@@ -95,9 +95,9 @@ def main() -> None:
 
     uplink_names = {u.name for u in cfg.uplinks}
 
-    # --- /etc/network/interfaces.d/uplinkmgr ---
+    # --- /etc/network/interfaces.d/uplinkmgr.conf ---
     generator.write_file(
-        "/etc/network/interfaces.d/uplinkmgr",
+        "/etc/network/interfaces.d/uplinkmgr.conf",
         generator.interfaces_file(cfg),
         dry_run,
     )

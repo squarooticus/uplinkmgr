@@ -6,7 +6,7 @@ set -e
 case "$1" in
     purge)
         # Remove all generated config files
-        rm -f /etc/network/interfaces.d/uplinkmgr
+        rm -f /etc/network/interfaces.d/uplinkmgr.conf
         rm -f /etc/dhcpcd-uplinkmgr-*.conf
         rm -f /etc/systemd/system/dhcpcd-uplinkmgr-*.service
         rm -f /etc/systemd/system/radvd-uplinkmgr-*.service
@@ -23,7 +23,7 @@ case "$1" in
 
     remove)
         # Remove generated files but leave /etc/uplinkmgr/ intact
-        rm -f /etc/network/interfaces.d/uplinkmgr
+        rm -f /etc/network/interfaces.d/uplinkmgr.conf
         rm -f /etc/dhcpcd-uplinkmgr-*.conf
         rm -f /etc/systemd/system/dhcpcd-uplinkmgr-*.service
         rm -f /etc/systemd/system/radvd-uplinkmgr-*.service

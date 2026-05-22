@@ -95,7 +95,7 @@ The design goal is to provide the following simultaneously:
               ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  Generated files:                                                │
-│   /etc/network/interfaces.d/uplinkmgr        (macvlan stanzas)    │
+│   /etc/network/interfaces.d/uplinkmgr.conf        (macvlan stanzas)    │
 │   /etc/dhcpcd-uplinkmgr-<name>.conf          (per-uplink dhcpcd)  │
 │   /etc/systemd/system/dhcpcd-uplinkmgr-<name>.service             │
 │   /etc/radvd/radvd-uplinkmgr-<name>.conf     (initial radvd cfg)  │
@@ -282,7 +282,7 @@ For each run, `uplinkmgr-setup` writes or overwrites the following files. Existi
 
 | File | Notes |
 |------|-------|
-| `/etc/network/interfaces.d/uplinkmgr` | macvlan `iface` stanzas (one per macvlan) |
+| `/etc/network/interfaces.d/uplinkmgr.conf` | macvlan `iface` stanzas (one per macvlan) |
 | `/etc/dhcpcd-uplinkmgr-<name>.conf` | dhcpcd config, one per uplink |
 | `/etc/systemd/system/dhcpcd-uplinkmgr-<name>.service` | systemd unit, one per uplink |
 | `/etc/radvd/radvd-uplinkmgr-<name>.conf` | radvd config (initial/up state), one per IPv6 uplink |
@@ -630,7 +630,7 @@ The rationale for optimistic start: at boot, dhcpcd instances have been running 
 
 ### 6.1 ifupdown Interface Stanzas
 
-Written to `/etc/network/interfaces.d/uplinkmgr`.
+Written to `/etc/network/interfaces.d/uplinkmgr.conf`.
 
 One `iface` stanza per macvlan interface (one per (uplink, internal-interface) pair where `ipv6_pd: true`).
 
@@ -1397,7 +1397,7 @@ Debian 13's `network-online.target` (and systemd's `wait-online` logic) will cau
 
 ### 12.2 Boot Sequence
 
-1. **ifupdown runs** (`/etc/init.d/networking start` or `networking.service`): Brings up all `auto` interfaces, including macvlan interfaces defined in `/etc/network/interfaces.d/uplinkmgr`.
+1. **ifupdown runs** (`/etc/init.d/networking start` or `networking.service`): Brings up all `auto` interfaces, including macvlan interfaces defined in `/etc/network/interfaces.d/uplinkmgr.conf`.
 
 2. **`dhcpcd-uplinkmgr-<name>.service` units start** for each uplink (ordered by systemd based on `After=` dependencies). Each unit runs a persistent dhcpcd instance that:
    - Obtains an IPv4 lease on the WAN interface.
