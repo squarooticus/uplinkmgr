@@ -1,0 +1,65 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        PREV_VERSION="$2"
+        FRESH_INSTALL=false
+        [ -z "$PREV_VERSION" ] && FRESH_INSTALL=true
+
+        # Install default config on first install
+        if $FRESH_INSTALL && [ ! -f /etc/uplinkmgr/uplinkmgr.yaml ]; then
+            install -d /etc/uplinkmgr
+            cp /etc/uplinkmgr/uplinkmgr.yaml.example \
+               /etc/uplinkmgr/uplinkmgr.yaml
+            echo "uplinkmgr: installed example config to /etc/uplinkmgr/uplinkmgr.yaml"
+            echo "uplinkmgr: edit it and run 'uplinkmgr-setup' before starting services"
+        fi
+
+        # Generate/regenerate config files
+        if [ -f /etc/uplinkmgr/uplinkmgr.yaml ]; then
+            uplinkmgr-setup || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+case "$1" in
+    configure)
+        # Disable the system-default dhcpcd instance to prevent conflicts.
+        # (Per-uplink dhcpcd instances managed by uplinkmgr conflict with it.)
+        if [ -d /run/systemd/system ]; then
+            if systemctl is-enabled --quiet dhcpcd.service 2>/dev/null; then
+                echo "uplinkmgr: disabling system-default dhcpcd.service (conflicts with uplinkmgr)"
+                systemctl disable --now dhcpcd.service || true
+            fi
+
+            FRESH_INSTALL=false
+            [ -z "$2" ] && FRESH_INSTALL=true
+
+            if $FRESH_INSTALL; then
+                # Enable and start per-uplink services (fresh install only;
+                # on upgrade dh_installsystemd restarts already-running services)
+                systemctl daemon-reload || true
+                for svc in /etc/systemd/system/dhcpcd-uplinkmgr-*.service \
+                           /etc/systemd/system/radvd-uplinkmgr-*.service; do
+                    [ -f "$svc" ] || continue
+                    name=$(basename "$svc")
+                    systemctl enable "$name" || true
+                    systemctl start "$name" || true
+                done
+            else
+                # Upgrade: restart per-uplink services only if already running
+                for svc in /etc/systemd/system/dhcpcd-uplinkmgr-*.service \
+                           /etc/systemd/system/radvd-uplinkmgr-*.service; do
+                    [ -f "$svc" ] || continue
+                    name=$(basename "$svc")
+                    if systemctl is-active --quiet "$name" 2>/dev/null; then
+                        systemctl restart "$name" || true
+                    fi
+                done
+            fi
+        fi
+        ;;
+esac

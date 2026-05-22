@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""uplinkmgr-setup — generate static config files from uplinkmgr.yaml."""
+
+import argparse
+import os
+import sys
+
+from uplinkmgr import config as cfg_mod
+from uplinkmgr import naming, generator
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Generate uplinkmgr config files from uplinkmgr.yaml"
+    )
+    p.add_argument(
+        "--config",
+        default=cfg_mod.DEFAULT_CONFIG_PATH,
+        metavar="PATH",
+        help=f"config file path (default: {cfg_mod.DEFAULT_CONFIG_PATH})",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would be written; write nothing to disk",
+    )
+    return p.parse_args()
+
+
+def check_rt_conflicts(cfg, dry_run: bool) -> None:
+    """Validate that uplinkmgr's table numbers/names don't conflict with existing entries."""
+    import re
+
+    our_nums = {
+        naming.table_num(cfg.routing_table_start, u.index)
+        for u in cfg.uplinks
+    }
+    our_names = {naming.table_name(u.name) for u in cfg.uplinks}
+
+    rt_dirs = ["/etc/iproute2/rt_tables.d", "/etc/iproute2"]
+    existing_nums: dict[int, str] = {}
+    existing_names: dict[str, str] = {}
+
+    for base in rt_dirs:
+        import glob
+        files = sorted(glob.glob(f"{base}/rt_tables*") + glob.glob(f"{base}/rt_tables.d/*.conf"))
+        for path in files:
+            if "uplinkmgr" in path:
+                continue  # our own file; expect overlap
+            try:
+                text = open(path).read()
+            except OSError:
+                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                try:
+                    num = int(parts[0])
+                    name = parts[1]
+                except ValueError:
+                    continue
+                existing_nums[num] = path
+                existing_names[name] = path
+
+    for num in our_nums:
+        if num in existing_nums:
+            _die(
+                f"routing table number {num} already used in {existing_nums[num]}; "
+                f"adjust routing_table_start"
+            )
+    for name in our_names:
+        if name in existing_names:
+            _die(
+                f"routing table name '{name}' already used in {existing_names[name]}; "
+                f"rename the uplink"
+            )
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = cfg_mod.load(args.config)
+    dry_run = args.dry_run
+
+    try:
+        naming.validate_macvlan_names(cfg)
+    except ValueError as e:
+        _die(str(e))
+
+    if not dry_run:
+        check_rt_conflicts(cfg, dry_run)
+
+    uplink_names = {u.name for u in cfg.uplinks}
+
+    # --- /etc/network/interfaces.d/uplinkmgr ---
+    generator.write_file(
+        "/etc/network/interfaces.d/uplinkmgr",
+        generator.interfaces_file(cfg),
+        dry_run,
+    )
+
+    # --- per-uplink dhcpcd and radvd files ---
+    for uplink in cfg.uplinks:
+        generator.write_file(
+            naming.dhcpcd_conf_path(uplink.name),
+            generator.dhcpcd_conf(cfg, uplink),
+            dry_run,
+        )
+        generator.write_file(
+            f"/etc/systemd/system/{naming.dhcpcd_unit_name(uplink.name)}",
+            generator.dhcpcd_unit(cfg, uplink),
+            dry_run,
+        )
+        if uplink.ipv6_pd:
+            generator.write_file(
+                naming.radvd_conf_path(uplink.name),
+                generator.radvd_conf(cfg, uplink),
+                dry_run,
+            )
+            generator.write_file(
+                f"/etc/systemd/system/{naming.radvd_unit_name(uplink.name)}",
+                generator.radvd_unit(cfg, uplink),
+                dry_run,
+            )
+
+    # --- routing table registration ---
+    generator.write_file(
+        "/etc/iproute2/rt_tables.d/uplinkmgr.conf",
+        generator.rt_tables(cfg),
+        dry_run,
+    )
+
+    # --- uplink env files and symlinks ---
+    for uplink in cfg.uplinks:
+        env_path = naming.env_file_path(uplink.name)
+        generator.write_file(env_path, generator.env_file(cfg, uplink), dry_run)
+        # symlink from WAN interface name to the env file
+        generator.write_symlink(
+            naming.env_symlink_path(uplink.interface),
+            f"{uplink.name}.env",
+            dry_run,
+        )
+        # symlinks from macvlan interface names
+        if uplink.ipv6_pd:
+            for net in cfg.networks:
+                mv = naming.macvlan_name(net.interface, uplink.index)
+                generator.write_symlink(
+                    naming.env_symlink_path(mv),
+                    f"{uplink.name}.env",
+                    dry_run,
+                )
+
+    # --- NAT reference fragment ---
+    generator.write_file(
+        "/etc/uplinkmgr/uplinkmgr-nat.nft.example",
+        generator.nat_fragment(cfg),
+        dry_run,
+    )
+
+    # --- clean up stale generated files ---
+    if not dry_run:
+        _remove_stale(cfg, uplink_names)
+
+    if not dry_run:
+        print("uplinkmgr-setup: configuration files written successfully.")
+        print("Remember to reload systemd and restart affected services:")
+        print("  systemctl daemon-reload")
+        for uplink in cfg.uplinks:
+            print(f"  systemctl restart {naming.dhcpcd_unit_name(uplink.name)}")
+            if uplink.ipv6_pd:
+                print(f"  systemctl restart {naming.radvd_unit_name(uplink.name)}")
+        print("  systemctl restart uplinkmgr.service")
+
+
+def _remove_stale(cfg, current_uplink_names: set[str]) -> None:
+    generator.remove_stale_files(
+        "/etc", "dhcpcd-uplinkmgr-", current_uplink_names, ".conf"
+    )
+    generator.remove_stale_files(
+        "/etc/systemd/system", "dhcpcd-uplinkmgr-", current_uplink_names, ".service"
+    )
+    generator.remove_stale_files(
+        "/etc/radvd", "radvd-uplinkmgr-", current_uplink_names, ".conf"
+    )
+    generator.remove_stale_files(
+        "/etc/systemd/system", "radvd-uplinkmgr-", current_uplink_names, ".service"
+    )
+    # Remove stale env files and their symlinks
+    import os
+    uplinks_dir = "/etc/uplinkmgr/uplinks"
+    if os.path.isdir(uplinks_dir):
+        for fname in os.listdir(uplinks_dir):
+            if fname.endswith(".env") and not os.path.islink(f"{uplinks_dir}/{fname}"):
+                uplink_name = fname[:-4]  # strip .env
+                if uplink_name not in current_uplink_names:
+                    os.unlink(f"{uplinks_dir}/{fname}")
+        # Remove dangling symlinks
+        for fname in os.listdir(uplinks_dir):
+            fpath = f"{uplinks_dir}/{fname}"
+            if os.path.islink(fpath) and not os.path.exists(fpath):
+                os.unlink(fpath)
+
+
+def _die(msg: str) -> None:
+    print(f"uplinkmgr-setup: error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

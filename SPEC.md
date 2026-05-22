@@ -1,0 +1,1741 @@
+# uplinkmgr — System Specification
+
+**Version:** 1.0-draft  
+**Date:** 2026-05-22  
+**Status:** Pre-implementation specification
+
+---
+
+## Table of Contents
+
+1. [Overview](#1-overview)
+2. [Terminology](#2-terminology)
+3. [System Architecture](#3-system-architecture)
+4. [Configuration File](#4-configuration-file)
+5. [Component Specifications](#5-component-specifications)
+   - 5.1 [uplinkmgr-setup](#51-uplinkmgr-setup)
+   - 5.2 [dhcpcd Hook: 50-uplinkmgr](#52-dhcpcd-hook-50-uplinkmgr)
+   - 5.3 [uplinkmgr Daemon](#53-uplinkmgr-daemon)
+6. [Generated File Formats](#6-generated-file-formats)
+   - 6.1 [ifupdown Interface Stanzas](#61-ifupdown-interface-stanzas)
+   - 6.2 [dhcpcd Configuration Files](#62-dhcpcd-configuration-files)
+   - 6.3 [dhcpcd systemd Units](#63-dhcpcd-systemd-units)
+   - 6.4 [radvd Configuration Files](#64-radvd-configuration-files)
+   - 6.5 [radvd systemd Units](#65-radvd-systemd-units)
+   - 6.6 [nftables NAT Reference Fragment](#66-nftables-nat-reference-fragment)
+   - 6.7 [Routing Table Registration](#67-routing-table-registration)
+   - 6.8 [Uplink Environment Files](#68-uplink-environment-files)
+7. [Naming Conventions and Derived Values](#7-naming-conventions-and-derived-values)
+8. [IPv4 Routing Behavior](#8-ipv4-routing-behavior)
+9. [IPv6 Routing and Delegation Behavior](#9-ipv6-routing-and-delegation-behavior)
+10. [Monitoring and State Machine](#10-monitoring-and-state-machine)
+11. [Provisioning and Deprovisioning Sequences](#11-provisioning-and-deprovisioning-sequences)
+12. [Boot-Time Behavior](#12-boot-time-behavior)
+13. [Daemon Lifecycle and Cleanup](#13-daemon-lifecycle-and-cleanup)
+14. [Debian Package Structure](#14-debian-package-structure)
+15. [Comparison with systemd-networkd](#15-comparison-with-systemd-networkd)
+16. [Constraints, Invariants, and Known Limitations](#16-constraints-invariants-and-known-limitations)
+17. [Open Verification Items](#17-open-verification-items)
+
+---
+
+## 1. Overview
+
+`uplinkmgr` is a system for configuring a Debian 13 (Trixie) Linux router to handle multiple internet (WAN) uplinks with automatic failover, for both IPv4 and IPv6.
+
+The design goal is to provide the following simultaneously:
+
+- **Resilient IPv4 connectivity** via metric-ordered default routes in the main table. The highest-priority live uplink is always used; if it fails, the next uplink's route takes over automatically.
+- **Multi-homed IPv6 connectivity** via SLAAC. Internal clients receive prefix advertisements from each live uplink through a dedicated macvlan interface and can use any live uplink's source address for outbound traffic, with policy routing ensuring return traffic uses the correct uplink.
+- **Graceful degradation** via radvd AdvDefaultPreference signalling and prefix deprecation when an uplink fails, guiding compliant clients away from failed uplinks without cutting off connectivity immediately.
+- **Boot-time connectivity without the daemon** so that Debian's network-wait timeout is never triggered.
+
+### Scope
+
+- **In scope:** DHCP WAN uplinks, IPv6 prefix delegation and SLAAC, ifupdown + dhcpcd-based configuration, radvd for RA, per-uplink policy routing tables, monitoring with hysteresis, Debian packaging.
+- **Out of scope:** PPPoE, static WAN configurations, DHCPv6 stateful address assignment to clients, firewall and NAT configuration (left to the administrator — uplinkmgr generates a reference nftables fragment but does not apply it), internal DHCP server configuration, ULA prefix advertisement (assumed pre-configured by the administrator in a separate radvd instance).
+
+---
+
+## 2. Terminology
+
+| Term | Definition |
+|------|-----------|
+| **Uplink** | A single WAN provider, identified by a name and a physical/virtual WAN interface. |
+| **Uplink index** | Zero-based sequential position of the uplink in the `uplinks:` list (uplink 0 is highest priority). |
+| **Internal interface** | A LAN-side interface (e.g., a VLAN subinterface) serving a logical internal network. |
+| **Macvlan interface** | A virtual interface created as a macvlan child of an internal interface, one per (uplink, internal-interface) pair, used to receive and source IPv6 traffic associated with that uplink. |
+| **Per-uplink routing table** | A kernel routing table (identified by number and name) that holds the routes for one uplink's traffic, used by policy routing rules. |
+| **PD** | IPv6 Prefix Delegation — the DHCPv6 mechanism by which a WAN router assigns a block of IPv6 addresses (typically a /56 or /48) to the customer router for further sub-delegation. |
+| **SLA ID** | Site-Level Aggregator identifier — a number used to sub-divide a delegated prefix into per-interface /64 prefixes. |
+| **RA** | Router Advertisement — ICMPv6 message sent by radvd to announce prefixes, routes, and default gateway to clients. |
+| **SLAAC** | Stateless Address Autoconfiguration — the process by which IPv6 hosts derive addresses from RA-advertised prefixes. |
+| **AdvDefaultPreference** | radvd parameter controlling the preference level (high/medium/low) of the default route announced in RAs. |
+| **Hook** | The dhcpcd exit hook script `/lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr`, invoked by dhcpcd on every lease event. |
+| **uplinkmgr-setup** | The one-shot provisioning tool that generates all configuration files from the YAML config. |
+| **uplinkmgr daemon** | The Python monitoring daemon that tracks uplink health and adjusts the main routing table and radvd configs at runtime. |
+
+---
+
+## 3. System Architecture
+
+### 3.1 Component Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        /etc/uplinkmgr/uplinkmgr.yaml                │
+└───────────────┬─────────────────────────────────────────────────┘
+                │ read by
+                ▼
+┌───────────────────────────┐
+│       uplinkmgr-setup       │  (one-shot, run at install/reconfig)
+│  generates config files   │
+└─────────────┬─────────────┘
+              │ writes
+              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Generated files:                                                │
+│   /etc/network/interfaces.d/uplinkmgr        (macvlan stanzas)    │
+│   /etc/dhcpcd-uplinkmgr-<name>.conf          (per-uplink dhcpcd)  │
+│   /etc/systemd/system/dhcpcd-uplinkmgr-<name>.service             │
+│   /etc/radvd/radvd-uplinkmgr-<name>.conf     (initial radvd cfg)  │
+│   /etc/systemd/system/radvd-uplinkmgr-<name>.service              │
+│   /etc/uplinkmgr/uplinkmgr-nat.nft.example   (NAT reference frag) │
+│   /etc/iproute2/rt_tables.d/uplinkmgr.conf   (table name→number)  │
+│   /etc/uplinkmgr/uplinks/<name>.env          (shell env fragment) │
+└──────────────────────────────────────────────────────────────────┘
+
+Boot / runtime event flow:
+                                                                    
+  ifupdown brings up macvlan interfaces                            
+       │                                                           
+  dhcpcd-uplinkmgr-<name>.service starts per-uplink dhcpcd          
+       │                                                           
+  dhcpcd obtains IPv4 lease → invokes exit hook                   
+       │  50-uplinkmgr: copies routes into per-uplink table,        
+       │              writes /run/uplinkmgr/<name>.ipv4.state        
+       │                                                           
+  dhcpcd obtains IPv6 PD → invokes exit hook                      
+       │  50-uplinkmgr: assigns /64 to macvlan interfaces,          
+       │              adds IPv6 routes to per-uplink table,        
+       │              installs ip -6 rules (iif macvlan → table)  
+       │                                                           
+  radvd-uplinkmgr-<name>.service starts radvd for that uplink       
+       │  (radvd advertises prefixes and default route via         
+       │   the macvlan interfaces)                                 
+       │                                                           
+  uplinkmgr daemon runs continuously                                 
+       │  monitors uplinks (ping IPv4/IPv6)                        
+       │  on failure: removes IPv4 default routes from main table  
+       │              regenerates radvd configs, SIGHUPs radvd    
+       │  on recovery: re-adds IPv4 default routes                 
+       │               regenerates radvd configs, SIGHUPs radvd   
+       ▼
+```
+
+### 3.2 Responsibility Matrix
+
+| Responsibility | uplinkmgr-setup | dhcpcd hook | uplinkmgr daemon |
+|---------------|:-------------:|:-----------:|:--------------:|
+| Create macvlan interface definitions | ✓ | | |
+| Generate dhcpcd configs | ✓ | | |
+| Generate systemd service units | ✓ | | |
+| Generate initial radvd configs | ✓ | | |
+| Generate NAT reference fragment | ✓ | | |
+| Register routing table names/numbers | ✓ | | |
+| Write per-uplink env files | ✓ | | |
+| Add IPv4 routes to per-uplink table | | ✓ | |
+| Write IPv4 gateway state file | | ✓ | |
+| Add IPv6 routes to per-uplink table | | ✓ | |
+| Install ip -6 rules (iif → table) | | ✓ | |
+| Assign /64 to macvlan interfaces | | ✓ | |
+| Remove all of the above on EXPIRE/STOP | | ✓ | |
+| Monitor uplink health | | | ✓ |
+| Remove/restore IPv4 default routes | | | ✓ |
+| Regenerate radvd configs at runtime | | | ✓ |
+| SIGHUP radvd instances | | | ✓ |
+| Cleanup on daemon stop | | | ✓ |
+
+### 3.3 Interfaces Added Per Uplink
+
+For a system with uplinks `[comcast (idx 0), starlink (idx 1)]` and internal interfaces `[vlan10, vlan20]`, the following macvlan interfaces are created:
+
+| Macvlan interface | Parent | Uplink | Internal iface |
+|------------------|--------|--------|----------------|
+| `vlan10-u0` | vlan10 | comcast (0) | vlan10 |
+| `vlan20-u0` | vlan20 | comcast (0) | vlan20 |
+| `vlan10-u1` | vlan10 | starlink (1) | vlan10 |
+| `vlan20-u1` | vlan20 | starlink (1) | vlan20 |
+
+Each macvlan interface gets:
+- A deterministic MAC address (see §7)
+- A deterministic link-local IPv6 address (see §7)
+- An IPv6 global address from the delegated /64 for that (uplink, interface) pair (assigned by the dhcpcd hook)
+
+---
+
+## 4. Configuration File
+
+### 4.1 Location
+
+`/etc/uplinkmgr/uplinkmgr.yaml`
+
+This file is installed as an example/default at package install time and is **not overwritten on upgrade** (managed via `dpkg-divert` or by checking existence in the `postinst` script).
+
+### 4.2 Full Schema
+
+```yaml
+uplinkmgr:
+  routing_table_start: 160      # first per-uplink routing table number (integer)
+  rule_priority_start: 29000    # first ip -6 rule priority (integer)
+  reject_incompatible_src: false # add prohibit default to per-uplink tables (bool)
+
+  monitor:
+    interval: 10                # seconds between probe cycles (integer, default: 10)
+    failure_threshold: 3        # consecutive failures before deprovisioning (integer, default: 3)
+    recovery_threshold: 3       # consecutive successes before reprovisioning (integer, default: 3)
+    v4_hosts:                   # list of IPv4 addresses to probe
+      - 8.8.8.8
+      - 1.1.1.1
+    v6_hosts:                   # list of IPv6 addresses to probe
+      - 2001:4860:4860::8888
+      - 2606:4700:4700::1111
+
+  networks:                     # internal LAN interfaces, in config-file order
+    - name: home                # logical name (used in log messages and comments only)
+      interface: vlan10         # kernel interface name
+    - name: iot
+      interface: vlan20
+
+  uplinks:                      # in priority order; index 0 = highest priority
+    - name: comcast             # short identifier (used in filenames, table names)
+      interface: eth0           # WAN physical/virtual interface
+      ipv6_pd: true             # request IPv6 PD; if false, IPv6 monitoring is skipped
+      ipv6_pd_hint: 56          # requested PD prefix length hint (integer, default: 56); ISP may ignore
+      metric: 100               # optional; default = 100 * (uplink_index + 1)
+    - name: starlink
+      interface: eth1
+      ipv6_pd: false            # IPv4-only uplink; no macvlan created, no PD requested
+```
+
+### 4.3 Field Constraints
+
+- `routing_table_start`: Must be in the range 1–252 (default: 160). Avoid the well-known reserved IDs: 0=unspec, 253=default, 254=main, 255=local. Values above 255 are also valid kernel table numbers, but the default keeps table IDs in the single-byte range for readability in `ip route show table all` output. The range `[routing_table_start, routing_table_start + len(uplinks) - 1]` must not overlap with any table numbers already in `/etc/iproute2/rt_tables` or `/etc/iproute2/rt_tables.d/`.
+- `rule_priority_start`: Must leave room for `len(uplinks) * len(networks) * 2` rules (one per macvlan interface direction, plus optional prohibit rules). The range is documented as `[rule_priority_start, rule_priority_start + 99]`.
+- `uplink.name`: Must consist only of alphanumeric characters and hyphens; must be unique across all uplinks.
+- `network.interface` and `uplink.interface`: Must be valid Linux interface names (max 15 chars). They are **not** validated against live interface existence by `uplinkmgr-setup` (the system may be configured before interfaces exist).
+- `uplink.metric`: If specified, must be a positive integer. If omitted, defaults to `100 * (uplink_index + 1)`.
+- `ipv6_pd: false` uplinks: No macvlan interfaces are created for these uplinks; no radvd config or service is generated; no IPv6 monitoring is performed.
+
+### 4.4 Minimal Working Example
+
+```yaml
+uplinkmgr:
+  monitor:
+    v4_hosts:
+      - 8.8.8.8
+  networks:
+    - name: home
+      interface: vlan10
+  uplinks:
+    - name: primary
+      interface: eth0
+      ipv6_pd: true
+```
+
+All other fields take their defaults.
+
+---
+
+## 5. Component Specifications
+
+### 5.1 `uplinkmgr-setup`
+
+#### 5.1.1 Purpose
+
+`uplinkmgr-setup` is a one-shot idempotent tool that reads the YAML config and (re)generates all static configuration files. It is run:
+- At initial package installation (from `postinst`)
+- Whenever the admin runs `dpkg-reconfigure uplinkmgr`
+- Manually when the config file is changed
+
+It does **not** apply runtime changes (restart services, reload nftables, etc.). That is the administrator's responsibility after running the tool, or it is handled by the package scripts.
+
+**After re-running `uplinkmgr-setup`**, the administrator must restart affected services to pick up the new generated files:
+- `systemctl restart dhcpcd-uplinkmgr-<name>` for any uplink whose dhcpcd config changed (dhcpcd does not reload config on SIGHUP)
+- `systemctl restart radvd-uplinkmgr-<name>` or `systemctl kill --signal=SIGHUP radvd-uplinkmgr-<name>` for radvd (SIGHUP is sufficient unless lifetimes need refreshing)
+- `systemctl restart uplinkmgr` if the uplink list or monitoring parameters changed
+
+The dhcpcd config is **fairly static** — it only changes when the uplink or network list is structurally modified (uplinks added/removed, networks added/removed, interface names changed, metric or `ipv6_pd_hint` changed). Day-to-day operation does not require re-running setup.
+
+#### 5.1.2 Invocation
+
+```
+uplinkmgr-setup [--config /etc/uplinkmgr/uplinkmgr.yaml] [--dry-run]
+```
+
+- `--config`: Path to config file. Default: `/etc/uplinkmgr/uplinkmgr.yaml`.
+- `--dry-run`: Print what would be written to stdout, write nothing to disk.
+
+#### 5.1.3 Output Files
+
+For each run, `uplinkmgr-setup` writes or overwrites the following files. Existing files are replaced atomically (write to a `.tmp` sibling, then `os.rename()`).
+
+| File | Notes |
+|------|-------|
+| `/etc/network/interfaces.d/uplinkmgr` | macvlan `iface` stanzas (one per macvlan) |
+| `/etc/dhcpcd-uplinkmgr-<name>.conf` | dhcpcd config, one per uplink |
+| `/etc/systemd/system/dhcpcd-uplinkmgr-<name>.service` | systemd unit, one per uplink |
+| `/etc/radvd/radvd-uplinkmgr-<name>.conf` | radvd config (initial/up state), one per IPv6 uplink |
+| `/etc/systemd/system/radvd-uplinkmgr-<name>.service` | systemd unit, one per IPv6 uplink |
+| `/etc/uplinkmgr/uplinkmgr-nat.nft.example` | NAT reference fragment (not applied automatically) |
+| `/etc/iproute2/rt_tables.d/uplinkmgr.conf` | routing table name→number mappings |
+| `/etc/uplinkmgr/uplinks/<name>.env` | shell env fragment, one per uplink |
+
+#### 5.1.4 Cleanup of Stale Files
+
+When `uplinkmgr-setup` runs, it removes any files from a previous run whose uplink name no longer exists in the current config. It tracks managed files by scanning for filenames matching the uplinkmgr naming patterns. This prevents stale configs from persisting after an uplink is removed.
+
+**Important:** `uplinkmgr-setup` does **not** disable or stop systemd units — that is left to the package scripts or administrator. It does emit a warning listing any units that should be disabled/stopped.
+
+#### 5.1.5 Directory Creation
+
+`uplinkmgr-setup` creates the following directories if they do not exist:
+- `/etc/uplinkmgr/uplinks/`
+- `/etc/radvd/` (if radvd is installed)
+- `/run/uplinkmgr/` (also created by the systemd service on start via `RuntimeDirectory=`)
+
+#### 5.1.6 Error Handling
+
+`uplinkmgr-setup` exits non-zero and prints a clear error message if:
+- The config file is missing or unparseable
+- Any uplink name fails the naming constraints
+- Routing table numbers would overlap with existing entries in `/etc/iproute2/rt_tables` or `/etc/iproute2/rt_tables.d/` (excluding any file named `uplinkmgr.conf` — that is expected to already contain the old uplinkmgr entries)
+- Any interface name exceeds 15 characters
+- Any derived macvlan name would exceed 15 characters after truncation logic (see §7.1)
+
+---
+
+### 5.2 dhcpcd Hook: `50-uplinkmgr`
+
+#### 5.2.1 Location
+
+`/lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr`
+
+This is a shell script installed by the Debian package. dhcpcd sources all files in `/lib/dhcpcd/dhcpcd-hooks/` in lexicographic order on every lease event. The `50-` prefix places it after dhcpcd's own built-in hooks (typically `01-test`, `20-resolv.conf`, `30-hostname`).
+
+#### 5.2.2 Hook Environment
+
+When dhcpcd invokes the hook, the following environment variables are set by dhcpcd itself (a non-exhaustive list of those used by the hook):
+
+| Variable | Meaning |
+|----------|---------|
+| `$reason` | The event reason: `BOUND`, `RENEW`, `REBIND`, `REBOOT`, `EXPIRE`, `RELEASE`, `STOP`, `ROUTERADVERT`, `BOUND6`, `RENEW6`, `EXPIRE6`, `STOP6` |
+| `$interface` | The interface dhcpcd is managing for this event |
+| `$ip_address` | Assigned IPv4 address (for BOUND/RENEW) |
+| `$subnet_mask` | IPv4 subnet mask |
+| `$routers` | Space-separated IPv4 default gateway(s) |
+| `$new_ip6_address` | Assigned IPv6 address (for BOUND6/RENEW6) |
+| `$new_ip6_prefix` | Delegated IPv6 prefix (e.g., `2001:db8::/56`) for PD events |
+| `$new_ip6_prefixlen` | Delegated prefix length |
+
+> **Verification item:** Confirm the exact variable names for IPv6 PD events in dhcpcd 10.x. The variables `$new_ip6_prefix` and `$new_ip6_prefixlen` appear in dhcpcd documentation but must be verified against the installed version on Debian 13 (Trixie) (dhcpcd 10.1). See §17.
+
+#### 5.2.3 Identifying the Uplink
+
+The hook identifies which uplink it is running for by sourcing the per-uplink env file:
+
+```sh
+UPLINKMGR_ENV_DIR=/etc/uplinkmgr/uplinks
+env_file="${UPLINKMGR_ENV_DIR}/${interface}.env"
+
+# If no env file for this interface, this is not an uplinkmgr-managed instance
+[ -f "$env_file" ] || return 0
+. "$env_file"
+```
+
+The `.env` file exports `UPLINKMGR_UPLINK_NAME`, `UPLINKMGR_TABLE_NAME`, `UPLINKMGR_TABLE_NUM`, `UPLINKMGR_UPLINK_INDEX`, `UPLINKMGR_WAN_IFACE`, and `UPLINKMGR_NETWORKS` (see §6.8).
+
+**Note:** Each per-uplink dhcpcd instance manages the WAN interface (`eth0`, `eth1`, etc.) **and** all macvlan interfaces for that uplink. Events will fire for each interface. The hook must check `$interface` to determine which interface the event is for and take the appropriate action.
+
+#### 5.2.4 IPv4 BOUND / RENEW / REBIND / REBOOT
+
+Triggered when: `$reason` is one of `BOUND`, `RENEW`, `REBIND`, `REBOOT` and `$interface` matches the WAN interface for this uplink.
+
+Actions:
+
+1. Extract the first gateway from `$routers` as `GW4`.
+2. Copy the default route into the per-uplink routing table:
+   ```sh
+   ip route replace default via "$GW4" dev "$interface" table "$UPLINKMGR_TABLE_NUM"
+   ```
+3. Write the gateway to the state file:
+   ```sh
+   mkdir -p /run/uplinkmgr
+   printf '%s\n' "$GW4" > "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv4.state"
+   ```
+
+**Note:** dhcpcd also adds a default route to the **main** table automatically (this is the route with the configured metric that ensures boot-time connectivity). The hook does **not** add or modify the main table's IPv4 default route — that is dhcpcd's responsibility. The hook only maintains the per-uplink copy.
+
+#### 5.2.5 IPv4 EXPIRE / RELEASE / STOP
+
+Triggered when: `$reason` is `EXPIRE`, `RELEASE`, or `STOP` and `$interface` matches the WAN interface.
+
+Actions:
+
+1. Remove the default route from the per-uplink table:
+   ```sh
+   ip route del default table "$UPLINKMGR_TABLE_NUM" 2>/dev/null || true
+   ```
+2. Remove the state file:
+   ```sh
+   rm -f "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv4.state"
+   ```
+
+#### 5.2.6 IPv6 ROUTERADVERT (WAN interface)
+
+Triggered when: `$reason` is `ROUTERADVERT` and `$interface` matches the WAN interface.
+
+This event fires when dhcpcd receives a Router Advertisement on the WAN interface, providing the upstream IPv6 default gateway. Confirmed variable names (dhcpcd 10.x): `$nd1_from` (RA source address / gateway), `$nd1_lifetime` (router lifetime in seconds).
+
+Actions:
+
+1. Extract the gateway and router lifetime:
+   ```sh
+   GW6="$nd1_from"
+   ND1_LIFETIME="$nd1_lifetime"
+   ```
+
+2. Add/replace the IPv6 default route in the per-uplink table with an expiry matching the router lifetime:
+   ```sh
+   ip -6 route replace default via "$GW6" dev "$interface" table "$UPLINKMGR_TABLE_NUM" \
+       expires "$ND1_LIFETIME"
+   ```
+   If `$nd1_lifetime` is 0 or absent, omit the `expires` parameter (treat as infinite).
+
+3. Write the IPv6 gateway state file:
+   ```sh
+   printf 'gateway=%s\nnd1_lifetime=%s\ntimestamp=%s\n' \
+       "$GW6" "$ND1_LIFETIME" "$(date +%s)" \
+       > "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv6gw.state"
+   ```
+
+4. Signal the daemon (best-effort; may not be running yet at boot):
+   ```sh
+   if [ -f /run/uplinkmgr/uplinkmgr.pid ]; then
+       kill -USR1 "$(cat /run/uplinkmgr/uplinkmgr.pid)" 2>/dev/null || true
+   fi
+   ```
+
+#### 5.2.7 IPv6 BOUND6 / RENEW6 (WAN interface — PD assignment)
+
+Triggered when: `$reason` is `BOUND6` or `RENEW6` and `$interface` matches the WAN interface.
+
+This event fires after dhcpcd has received (or renewed) a delegated prefix. The PD variables are present on the **WAN interface** event, not on the macvlan interface events. Confirmed variable names: `$dhcp6_ia_pd1_prefix1` (delegated prefix address), `$dhcp6_ia_pd1_prefix1_length` (prefix length, e.g. 60), `$dhcp6_ia_pd1_prefix1_vltime`, `$dhcp6_ia_pd1_prefix1_pltime`.
+
+Actions:
+
+1. Extract the delegated prefix info. If `$dhcp6_ia_pd1_prefix1` is absent (no PD in this event), exit the handler.
+   ```sh
+   DELEGATED_PREFIX="$dhcp6_ia_pd1_prefix1"
+   DELEGATED_LENGTH="$dhcp6_ia_pd1_prefix1_length"
+   VLTIME="$dhcp6_ia_pd1_prefix1_vltime"
+   PLTIME="$dhcp6_ia_pd1_prefix1_pltime"
+   ```
+
+2. Write the PD state file:
+   ```sh
+   printf 'delegated_prefix=%s\ndelegated_length=%s\nvltime=%s\npltime=%s\ntimestamp=%s\n' \
+       "$DELEGATED_PREFIX" "$DELEGATED_LENGTH" "$VLTIME" "$PLTIME" "$(date +%s)" \
+       > "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
+   ```
+   The daemon derives per-macvlan /64 prefixes from `delegated_prefix`, `delegated_length`, and each network interface's SLA ID (its 0-based index in the `networks:` config list).
+
+3. Signal the daemon (best-effort):
+   ```sh
+   if [ -f /run/uplinkmgr/uplinkmgr.pid ]; then
+       kill -USR1 "$(cat /run/uplinkmgr/uplinkmgr.pid)" 2>/dev/null || true
+   fi
+   ```
+
+#### 5.2.8 IPv6 BOUND6 / RENEW6 (macvlan interfaces — route and rule setup)
+
+Triggered when: `$reason` is `BOUND6` or `RENEW6` and `$interface` is one of the macvlan interfaces for this uplink.
+
+This event fires after dhcpcd has assigned a delegated sub-prefix to a macvlan interface. The PD lifetime variables are **not** reliably present here; they are handled in §5.2.7. This handler's sole responsibility is routing state.
+
+Actions:
+
+1. Derive the /64 prefix assigned to this interface from `$new_ip6_address` (zero the lower 64 bits):
+   ```sh
+   PREFIX=$(python3 -c "
+   import ipaddress, sys
+   addr = ipaddress.ip_interface('${new_ip6_address}/${new_ip6_prefixlen}')
+   print(addr.network.supernet(new_prefix=64).network_address)
+   ")
+   ```
+
+2. Add the prefix route to the per-uplink table:
+   ```sh
+   ip -6 route replace "${PREFIX}/64" dev "$interface" table "$UPLINKMGR_TABLE_NUM"
+   ```
+
+3. Install the policy routing rule linking this macvlan to the per-uplink table (idempotent):
+   ```sh
+   ip -6 rule del iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" priority "$RULE_PRIORITY" 2>/dev/null || true
+   ip -6 rule add iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" priority "$RULE_PRIORITY"
+   ```
+   The rule priority is `UPLINKMGR_RULE_PRIORITY_START + (macvlan_sequential_index)`.
+
+4. If `reject_incompatible_src` is enabled, ensure the prohibit default is in the per-uplink table:
+   ```sh
+   ip -6 route replace prohibit default table "$UPLINKMGR_TABLE_NUM" metric 65535
+   ```
+
+#### 5.2.9 IPv6 EXPIRE6 / STOP6 (macvlan interfaces)
+
+Triggered when: `$reason` is `EXPIRE6` or `STOP6` and `$interface` is one of the macvlan interfaces.
+
+Actions:
+
+1. Remove the prefix route from the per-uplink table:
+   ```sh
+   ip -6 route del "${PREFIX}/64" dev "$interface" table "$UPLINKMGR_TABLE_NUM" 2>/dev/null || true
+   ```
+2. Remove the policy routing rule:
+   ```sh
+   ip -6 rule del iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" priority "$RULE_PRIORITY" 2>/dev/null || true
+   ```
+
+#### 5.2.10 Hook Non-uplinkmgr Events
+
+If the hook sources an env file and determines that `$interface` is the WAN interface but `$reason` is an unrecognized value, the hook exits 0 (no-op). The hook must **never** fail with a non-zero exit for unrecognized events — dhcpcd treats hook failures as errors.
+
+---
+
+### 5.3 `uplinkmgr` Daemon
+
+#### 5.3.1 Purpose
+
+The daemon monitors uplink health at regular intervals and adjusts:
+- IPv4 default routes in the main routing table (removing failed uplinks, restoring recovered uplinks)
+- radvd configurations (updating AdvDefaultPreference and prefix lifetimes based on IPv6 uplink state)
+
+The daemon does **not** manage per-uplink routing tables or ip -6 rules — those are managed by the dhcpcd hook.
+
+#### 5.3.2 Invocation
+
+```
+uplinkmgr [--config /etc/uplinkmgr/uplinkmgr.yaml] [--state-dir /run/uplinkmgr]
+```
+
+The daemon runs in the foreground; systemd handles daemonization.
+
+#### 5.3.3 State Directory
+
+`/run/uplinkmgr/` (created as `RuntimeDirectory=uplinkmgr` in the systemd unit, or by `uplinkmgr-setup` if run outside systemd).
+
+The daemon reads and writes:
+- `<uplink-name>.ipv4.state` — written by the dhcpcd hook on IPv4 BOUND/RENEW; one line containing the IPv4 gateway address. The daemon reads this to recover the gateway when restoring a route.
+- `<uplink-name>.ipv6gw.state` — written by the dhcpcd hook on ROUTERADVERT (WAN interface); key=value lines: `gateway` (`$nd1_from`), `nd1_lifetime` (seconds, 0 if infinite), `timestamp` (Unix epoch). The daemon reads this to populate `AdvDefaultLifetime` and `AdvRouteLifetime` and to compute their remaining values.
+- `<uplink-name>.ipv6pd.state` — written by the dhcpcd hook on WAN BOUND6/RENEW6; key=value lines: `delegated_prefix`, `delegated_length`, `vltime`, `pltime`, `timestamp`. The daemon derives per-macvlan /64 prefixes from `delegated_prefix`/`delegated_length` using each network's SLA ID, and uses `vltime`/`pltime` to populate `AdvValidLifetime` and `AdvPreferredLifetime`.
+- `uplinkmgr.pid` — written by the daemon at startup; contains the daemon PID. The hook uses this to send SIGUSR1 when new RA or PD state arrives.
+- `<uplink-name>.runtime` — written by the daemon itself; JSON file tracking which routes/configs the daemon has modified (used for cleanup on stop).
+
+#### 5.3.4 IPv4 Route Management
+
+The daemon reads the IPv4 gateway from `<uplink-name>.ipv4.state`.
+
+When an uplink transitions to DOWN (IPv4):
+```sh
+ip route del default via <GW4> dev <wan-iface> metric <metric>
+```
+(This removes the specific route; if the gateway or metric do not match exactly, the deletion may fail silently. The daemon logs this.)
+
+When an uplink recovers (IPv4, transitions to UP):
+```sh
+ip route replace default via <GW4> dev <wan-iface> metric <metric>
+```
+If the state file does not exist at recovery time (dhcpcd has not yet obtained a lease), the daemon skips route restoration and logs a warning. The dhcpcd hook will add the route when the lease is obtained.
+
+#### 5.3.5 radvd Config Regeneration
+
+radvd's `DecrementLifetimes` counters **are not reset on SIGHUP** — they continue from where they were. Config file lifetime values are only applied when radvd starts fresh (at service start or `systemctl restart`). This determines when to SIGHUP vs. restart:
+
+| Trigger | Action | Why |
+|---------|--------|-----|
+| Uplink state change (UP↔DOWN) | SIGHUP | Only preference tier changes; radvd's live counters are already accurate |
+| SIGUSR1 from hook (new PD or RA data) | `systemctl restart` | Need radvd to pick up fresh lifetime values from the config |
+
+In both cases the daemon first regenerates the config for **all** IPv6 uplinks (a state change can affect other uplinks' preference tiers), then either SIGHUPs or restarts each radvd instance.
+
+**For SIGHUP** (state change): lifetime values written to the config are irrelevant to the live countdown — only write updated preference values. The daemon still writes accurate remaining lifetimes so the config is correct if radvd happens to be restarted later for another reason.
+
+**For restart** (SIGUSR1): the daemon reads all state files and computes remaining lifetimes (`max(0, value - (now - timestamp))`). For values just renewed by dhcpcd, this is approximately the full new lifetime. Writes configs, then restarts radvd instances:
+```python
+subprocess.run(['systemctl', 'restart', f'radvd-uplinkmgr-{name}.service'])
+```
+
+#### 5.3.6 Main Loop
+
+```
+while True:
+    for each uplink:
+        probe IPv4 (if state file exists or uplink was previously UP)
+        probe IPv6 (if ipv6_pd=true)
+        update state machine
+        if state changed: apply provisioning/deprovisioning actions
+    sleep(monitor.interval)
+```
+
+The probe and state update for each uplink are independent — an uplink's IPv4 and IPv6 states are tracked and acted on separately. A single uplink can be IPv4-UP + IPv6-DOWN simultaneously.
+
+#### 5.3.7 Probing
+
+**IPv4 probe:**
+```sh
+ping -c 1 -W 2 -I <wan-iface> <host>
+```
+Run for each host in `monitor.v4_hosts`. The probe passes if **any** host responds. The probe fails if **all** hosts fail or time out.
+
+The probe is run using the main routing table (the WAN interface is specified by `-I` but the kernel selects the route via the main table, where dhcpcd has placed a default route with the configured metric).
+
+**IPv6 probe:**
+```sh
+ping6 -c 1 -W 2 -I <wan-iface> <host>
+```
+Run for each host in `monitor.v6_hosts`. Same pass/fail logic.
+
+The IPv6 probe binds to the WAN interface (`-I <wan-iface>`) and the kernel routes the packet via the per-uplink routing table (since the WAN interface has the IPv6 default route pointing to the upstream gateway in both the main table and the per-uplink table).
+
+**IPv6 probe preconditions:** IPv6 probing is only performed when:
+1. `ipv6_pd: true` for the uplink, AND
+2. The per-uplink routing table contains an IPv6 default route (i.e., dhcpcd has obtained a lease and the hook has run).
+
+If the preconditions are not met, the IPv6 state for that uplink remains in its current state (not transitioned).
+
+#### 5.3.8 Startup Behavior
+
+On startup, the daemon:
+
+1. Reads the config file.
+2. Initializes all uplink states to `UP` (optimistic start — routes are assumed present).
+3. Writes an initial `.runtime` file recording the current state.
+4. Begins the monitoring loop immediately (no delay).
+
+The rationale for optimistic start: at boot, dhcpcd instances have been running and have configured routes before the daemon starts (see §12). The daemon should not deprovision anything until it has actually observed failures.
+
+---
+
+## 6. Generated File Formats
+
+### 6.1 ifupdown Interface Stanzas
+
+Written to `/etc/network/interfaces.d/uplinkmgr`.
+
+One `iface` stanza per macvlan interface (one per (uplink, internal-interface) pair where `ipv6_pd: true`).
+
+```
+# Generated by uplinkmgr-setup. Do not edit by hand.
+# Regenerate with: uplinkmgr-setup
+
+auto vlan10-u0
+iface vlan10-u0 inet manual
+    pre-up ip link add link vlan10 name vlan10-u0 type macvlan mode bridge
+    pre-up ip link set vlan10-u0 address 52:00:00:00:00:00
+    pre-up sysctl -q net.ipv6.conf.vlan10-u0.addr_gen_mode=1
+    up ip link set vlan10-u0 up
+    up ip -6 addr add fe80::1:0 dev vlan10-u0 scope link
+    down ip -6 addr del fe80::1:0 dev vlan10-u0 scope link 2>/dev/null || true
+    down ip link del vlan10-u0 2>/dev/null || true
+
+auto vlan20-u0
+iface vlan20-u0 inet manual
+    pre-up ip link add link vlan20 name vlan20-u0 type macvlan mode bridge
+    pre-up ip link set vlan20-u0 address 52:00:01:00:00:00
+    pre-up sysctl -q net.ipv6.conf.vlan20-u0.addr_gen_mode=1
+    up ip link set vlan20-u0 up
+    up ip -6 addr add fe80::1:0 dev vlan20-u0 scope link
+    down ip -6 addr del fe80::1:0 dev vlan20-u0 scope link 2>/dev/null || true
+    down ip link del vlan20-u0 2>/dev/null || true
+
+auto vlan10-u1
+iface vlan10-u1 inet manual
+    pre-up ip link add link vlan10 name vlan10-u1 type macvlan mode bridge
+    pre-up ip link set vlan10-u1 address 52:01:00:00:00:00
+    pre-up sysctl -q net.ipv6.conf.vlan10-u1.addr_gen_mode=1
+    up ip link set vlan10-u1 up
+    up ip -6 addr add fe80::1:1 dev vlan10-u1 scope link
+    down ip -6 addr del fe80::1:1 dev vlan10-u1 scope link 2>/dev/null || true
+    down ip link del vlan10-u1 2>/dev/null || true
+
+auto vlan20-u1
+iface vlan20-u1 inet manual
+    pre-up ip link add link vlan20 name vlan20-u1 type macvlan mode bridge
+    pre-up ip link set vlan20-u1 address 52:01:01:00:00:00
+    pre-up sysctl -q net.ipv6.conf.vlan20-u1.addr_gen_mode=1
+    up ip link set vlan20-u1 up
+    up ip -6 addr add fe80::1:1 dev vlan20-u1 scope link
+    down ip -6 addr del fe80::1:1 dev vlan20-u1 scope link 2>/dev/null || true
+    down ip link del vlan20-u1 2>/dev/null || true
+```
+
+**Notes:**
+- `auto` before each `iface` stanza causes ifupdown to bring the interface up at boot (without it, the interface is only activated by explicit `ifup`).
+- `addr_gen_mode=1` disables EUI-64 automatic link-local generation so the explicit `fe80::1:<N>` can be assigned without conflict.
+- The `pre-up` stanzas run before the interface is brought up; `up` stanzas run after; `down` stanzas run when the interface is taken down.
+- Error suppression (`2>/dev/null || true`) on `down` stanzas is intentional: these commands are best-effort cleanup.
+- The `macvlan mode bridge` allows the macvlan interface to receive multicast/broadcast from the parent interface, which is necessary for SLAAC (multicast solicited-node addresses) to work.
+
+### 6.2 dhcpcd Configuration Files
+
+Written to `/etc/dhcpcd-uplinkmgr-<name>.conf`. One file per uplink.
+
+Example for uplink `comcast` on `eth0` with `ipv6_pd: true`, managing macvlan interfaces `vlan10-u0` and `vlan20-u0`:
+
+```
+# Generated by uplinkmgr-setup for uplink: comcast
+# Do not edit by hand.
+
+# Only manage the WAN interface and the macvlan interfaces for this uplink
+allowinterfaces eth0 vlan10-u0 vlan20-u0
+
+# WAN interface
+interface eth0
+    # Enable Router Solicitation to discover the IPv6 gateway and default route
+    ipv6rs
+    # Request an IPv6 address assignment via DHCPv6 (IA_NA, IAID=1)
+    ia_na 1
+    # Request prefix delegation (IA_PD, IAID=2); sub-delegate /64s to macvlan interfaces
+    ia_pd 2/::/56 vlan10-u0/0/64 vlan20-u0/1/64
+    # Use a DUID for consistent lease assignment across restarts
+    duid
+    # Set the metric for the IPv4 default route in the main table
+    metric 100
+
+# Enable the uplinkmgr exit hook
+hook /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr
+```
+
+**Notes on dhcpcd config:**
+- `allowinterfaces` restricts this dhcpcd instance to managing only the listed interfaces, preventing conflicts with other dhcpcd instances or the system default instance.
+- `ipv6rs` enables Router Solicitation on the WAN interface so dhcpcd can discover the provider's IPv6 gateway. This triggers the `ROUTERADVERT` hook event, which records the gateway and router lifetime for the per-uplink routing table and radvd config.
+- `ia_na 1`: Requests an IPv6 address via DHCPv6 (IA_NA) with IAID 1. Required for the WAN interface to have a routable IPv6 source address.
+- `ia_pd 2/::/56 vlan10-u0/0/64 vlan20-u0/1/64`: Requests prefix delegation (IAID=2) with a hint of `/56`; sub-delegates sequential /64s to each macvlan interface by SLA ID (0-based, in network config-file order). The ISP may grant a different prefix length than the hint.
+- `duid`: Instructs dhcpcd to use a DUID for DHCPv6, ensuring consistent lease and prefix assignment across restarts.
+- The `metric` directive sets the metric for the IPv4 default route that dhcpcd adds to the main table.
+- `hook` explicitly loads the uplinkmgr hook. This ensures the hook runs even if the system default hook loading mechanism is altered.
+- The `/56` hint in `ia_pd` comes from `ipv6_pd_hint` in `uplinkmgr.yaml` (default: 56).
+
+> **Verification item:** Confirm `allowinterfaces` is the correct directive (and spelling) in dhcpcd 10.x for restricting which interfaces a dhcpcd instance manages. See §17.
+
+Example for uplink `starlink` on `eth1` with `ipv6_pd: false` (IPv4-only):
+
+```
+# Generated by uplinkmgr-setup for uplink: starlink
+# Do not edit by hand.
+
+allowinterfaces eth1
+
+interface eth1
+    ipv4only true
+    metric 200
+
+hook /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr
+```
+
+### 6.3 dhcpcd systemd Units
+
+Written to `/etc/systemd/system/dhcpcd-uplinkmgr-<name>.service`. One file per uplink.
+
+```ini
+# Generated by uplinkmgr-setup for uplink: comcast
+# Do not edit by hand.
+
+[Unit]
+Description=DHCP client for uplinkmgr uplink: comcast (eth0)
+After=network.target sys-subsystem-net-devices-eth0.device
+Wants=sys-subsystem-net-devices-eth0.device
+Before=uplinkmgr.service
+
+[Service]
+Type=forking
+PIDFile=/run/dhcpcd/eth0.pid
+ExecStart=/usr/sbin/dhcpcd --config /etc/dhcpcd-uplinkmgr-comcast.conf \
+    --nobackground eth0
+ExecStop=/usr/sbin/dhcpcd --exit --config /etc/dhcpcd-uplinkmgr-comcast.conf eth0
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Notes:**
+- `Before=uplinkmgr.service` ensures that dhcpcd instances are started (and have had a chance to obtain leases) before the monitoring daemon starts.
+- `After=sys-subsystem-net-devices-<wan-iface>.device` ensures dhcpcd starts only after the WAN interface is present.
+- `--nobackground`: Runs dhcpcd in the foreground so systemd can track it (together with `Type=forking` and `PIDFile`).
+- The WAN interface name is passed as a positional argument. dhcpcd writes its pid to `/run/dhcpcd/<iface>.pid` automatically when an interface is specified this way.
+- `Restart=on-failure` with `RestartSec=5s` ensures dhcpcd is restarted if it crashes.
+
+> **Note:** dhcpcd path confirmed as `/usr/sbin/dhcpcd` (item 5); flags `--config` and `--nobackground` confirmed (item 6).
+
+### 6.4 radvd Configuration Files
+
+Written to `/etc/radvd/radvd-uplinkmgr-<name>.conf`. One file per IPv6 uplink, initially generated in the "all-up" state.
+
+The daemon regenerates these files at runtime (see §11). The format must be identical between `uplinkmgr-setup` and the daemon — they use the same generation logic.
+
+**Lifetime values are sourced from state files, never hardcoded.** The daemon reads `nd1_lifetime`, `vltime`, and `pltime` from the state files written by the dhcpcd hook and computes remaining lifetimes (`max(0, value - elapsed)`). These are written into the config so that when radvd starts (or restarts), it begins counting down from the correct remaining value. On SIGHUP, radvd ignores the new lifetime values in the config and continues its internal counters — so SIGHUP is only used for preference-tier changes; a full restart is used when lifetimes need refreshing (see §5.3.5).
+
+Example runtime config for uplink `comcast` (index 0, highest priority, IPv6 UP), with delegated prefix `2001:db8:aaaa::/56`, nd1_lifetime=1800, vltime=86400, pltime=14400, written 300 seconds after delegation:
+
+```
+# Generated by uplinkmgr daemon for uplink: comcast
+# Do not edit by hand. This file is regenerated automatically.
+
+interface vlan10-u0
+{
+    AdvSendAdvert on;
+    AdvDefaultPreference high;
+    AdvDefaultLifetime 1500;        # remaining nd1_lifetime: 1800 - 300
+
+    route ::/0
+    {
+        AdvRoutePreference high;
+        AdvRouteLifetime 1500;      # remaining nd1_lifetime: 1800 - 300
+    };
+
+    prefix 2001:db8:aaaa::/64
+    {
+        AdvOnLink on;
+        AdvAutonomous on;
+        AdvRouterAddr on;
+        AdvValidLifetime 86100;     # remaining vltime: 86400 - 300
+        AdvPreferredLifetime 14100; # remaining pltime: 14400 - 300
+        DecrementLifetimes on;
+    };
+
+    RDNSS { };
+    DNSSL { };
+};
+
+interface vlan20-u0
+{
+    AdvSendAdvert on;
+    AdvDefaultPreference high;
+    AdvDefaultLifetime 1500;
+
+    route ::/0
+    {
+        AdvRoutePreference high;
+        AdvRouteLifetime 1500;
+    };
+
+    prefix 2001:db8:aaaa:0001::/64
+    {
+        AdvOnLink on;
+        AdvAutonomous on;
+        AdvRouterAddr on;
+        AdvValidLifetime 86100;
+        AdvPreferredLifetime 14100;
+        DecrementLifetimes on;
+    };
+
+    RDNSS { };
+    DNSSL { };
+};
+```
+
+**Initial config (generated by `uplinkmgr-setup` before PD has occurred):** Uses safe placeholder values — `AdvValidLifetime 7200`, `AdvPreferredLifetime 1800`, `AdvDefaultLifetime 1800`, `AdvRouteLifetime 1800` — with `DecrementLifetimes on`. These are conservative values that will not cause clients to cache stale state for long before the daemon regenerates the config on first PD receipt.
+
+> **Verification item:** Confirm whether radvd on Debian 13 (Trixie) supports the `AdvRouterAddr on` directive to automatically use the macvlan's assigned global address as the router address, and whether `prefix ::/64` with `AdvRouterAddr on` causes it to advertise the delegated /64 automatically when dhcpcd assigns it. If not, the daemon must write the explicit prefix (computed from `<uplink>.ipv6pd.state` using the SLA ID) into the radvd config on each PD assignment. See §17.
+
+**Preference tiers for generated radvd config:**
+
+| Uplink state | AdvDefaultPreference | AdvRoutePreference | AdvPreferredLifetime | AdvValidLifetime | AdvDefaultLifetime / AdvRouteLifetime |
+|-------------|---------------------|-------------------|---------------------|-----------------|--------------------------------------|
+| IPv6 UP | `high` or `medium` | `high` or `medium` | remaining pltime from state file | remaining vltime from state file | remaining nd1_lifetime from state file |
+| IPv6 DOWN | `low` | `low` | 0 | 1800 | remaining nd1_lifetime from state file |
+
+("Remaining" values are `max(0, value - elapsed)` at the time the config is written; for freshly renewed leases this is approximately the full value.)
+
+When set to DOWN state:
+- `AdvPreferredLifetime 0` — immediately deprecates the prefix; clients will not form new connections using this source address.
+- `AdvValidLifetime 1800` — keeps the prefix valid (reachable) for 30 minutes, allowing existing connections to drain.
+- `AdvDefaultLifetime` and `AdvRouteLifetime` are **not** zeroed on DOWN — the router remains reachable as a last resort; only the prefix preference signals clients away.
+- `DecrementLifetimes on` is always present on prefix blocks regardless of uplink state.
+
+### 6.5 radvd systemd Units
+
+Written to `/etc/systemd/system/radvd-uplinkmgr-<name>.service`. One file per IPv6 uplink.
+
+```ini
+# Generated by uplinkmgr-setup for uplink: comcast
+# Do not edit by hand.
+
+[Unit]
+Description=Router advertisement daemon for uplinkmgr uplink: comcast
+After=network.target dhcpcd-uplinkmgr-comcast.service
+Requires=dhcpcd-uplinkmgr-comcast.service
+
+[Service]
+Type=forking
+PIDFile=/run/radvd-uplinkmgr-comcast.pid
+ExecStart=/usr/sbin/radvd --configtest --config /etc/radvd/radvd-uplinkmgr-comcast.conf
+ExecStart=/usr/sbin/radvd \
+    --config /etc/radvd/radvd-uplinkmgr-comcast.conf \
+    --pidfile /run/radvd-uplinkmgr-comcast.pid \
+    --nodaemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Notes:**
+- The `--configtest` `ExecStart` line validates the config before starting; systemd runs `ExecStart` lines in order and stops if any fails. This prevents radvd from starting with a malformed config.
+- `--nodaemon` with `Type=forking` — confirm the correct combination for the radvd version on Debian 13 (Trixie).
+- `ExecReload` with SIGHUP allows `systemctl reload` or `systemctl kill --signal=SIGHUP` to trigger config re-read.
+
+> **Verification item:** Confirm radvd's command-line flags on Debian 13 (Trixie) (`--nodaemon`, `--config`, `--pidfile`, `--configtest`). See §17.
+
+### 6.6 nftables NAT Reference Fragment
+
+Written to `/etc/uplinkmgr/uplinkmgr-nat.nft.example`.
+
+Firewall and NAT configuration is left to the administrator. `uplinkmgr-setup` generates this reference fragment as a starting point but does **not** apply it automatically.
+
+```nft
+# NAT reference fragment generated by uplinkmgr-setup.
+# This file is NOT applied automatically.
+# Review and incorporate into your nftables configuration as appropriate.
+# Regenerate with: uplinkmgr-setup
+
+table ip uplinkmgr_nat {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+
+        # Masquerade outbound traffic on all WAN interfaces
+        oifname "eth0" masquerade
+        oifname "eth1" masquerade
+    }
+}
+```
+
+**Notes:**
+- The administrator is responsible for applying these rules to their nftables configuration. The exact method depends on how the administrator has structured their nftables setup.
+- The table name `uplinkmgr_nat` is chosen to avoid conflicts with any existing `nat` table the administrator may have configured.
+- IPv6 NAT (NPTv6) is **not** included — IPv6 uses native global addresses from the delegated prefix. No masquerade is needed or desired for IPv6.
+- `uplinkmgr-setup` regenerates this file with the current set of WAN interfaces whenever the uplinks configuration changes.
+
+### 6.7 Routing Table Registration
+
+Written to `/etc/iproute2/rt_tables.d/uplinkmgr.conf`.
+
+```
+# Generated by uplinkmgr-setup.
+# Do not edit by hand.
+
+160     uplinkmgr_comcast
+161     uplinkmgr_starlink
+```
+
+**Notes:**
+- Table numbers start at `routing_table_start` (default: 160).
+- Table names are `uplinkmgr_<uplink-name>`.
+- This file is read by iproute2 tools (`ip route`, `ip rule`) to allow table names to be used in commands.
+- Files in `/etc/iproute2/rt_tables.d/` are merged with the main `/etc/iproute2/rt_tables` file by iproute2 at runtime. Conflicts (duplicate numbers or names) between this file and the main file or other `.d/` files are an error detected by `uplinkmgr-setup`.
+
+### 6.8 Uplink Environment Files
+
+Written to `/etc/uplinkmgr/uplinks/<uplink-name>.env`. One file per uplink.
+
+These files are sourced by the dhcpcd hook to identify the uplink context.
+
+Example for uplink `comcast` (index 0):
+
+```sh
+# Generated by uplinkmgr-setup for uplink: comcast
+# Do not edit by hand.
+
+UPLINKMGR_UPLINK_NAME=comcast
+UPLINKMGR_UPLINK_INDEX=0
+UPLINKMGR_TABLE_NAME=uplinkmgr_comcast
+UPLINKMGR_TABLE_NUM=160
+UPLINKMGR_WAN_IFACE=eth0
+UPLINKMGR_RULE_PRIORITY_START=29000
+UPLINKMGR_MACVLAN_INTERFACES="vlan10-u0 vlan20-u0"
+UPLINKMGR_IPV6_PD=true
+```
+
+The hook locates the env file by `$interface`: for a dhcpcd instance managing `eth0`, `vlan10-u0`, `vlan20-u0`, the env file is keyed by the uplink's WAN interface name. Because dhcpcd events fire for each interface, the hook checks if `$interface` matches `$UPLINKMGR_WAN_IFACE` or is in `$UPLINKMGR_MACVLAN_INTERFACES` to determine the action branch.
+
+**Alternative env file lookup:** The env file is named by the **uplink name** (`comcast.env`), not the WAN interface name. The hook needs to find the env file for a given `$interface`. To avoid a linear scan, `uplinkmgr-setup` also writes **symlinks** named by each managed interface:
+
+```
+/etc/uplinkmgr/uplinks/eth0.env -> comcast.env
+/etc/uplinkmgr/uplinks/vlan10-u0.env -> comcast.env
+/etc/uplinkmgr/uplinks/vlan20-u0.env -> comcast.env
+```
+
+The hook sources `/etc/uplinkmgr/uplinks/${interface}.env` directly.
+
+---
+
+## 7. Naming Conventions and Derived Values
+
+### 7.1 Macvlan Interface Names
+
+Pattern: `<internal-iface>-u<uplink-index>`
+
+Examples:
+- Internal interface `vlan10`, uplink index 0 → `vlan10-u0`
+- Internal interface `vlan20`, uplink index 1 → `vlan20-u1`
+
+**Truncation:** Linux interface names are limited to 15 characters (IFNAMSIZ - 1). If the derived name exceeds 15 characters, it is truncated as follows:
+
+- The suffix `-u<N>` is always preserved (maximum 4 characters for index 0–9, 5 for 10–99).
+- The internal interface name is truncated to fill the remaining characters: `<iface[:15-len(suffix)]><suffix>`.
+
+Example: internal interface `ethernet-uplink` (15 chars), uplink index 3:
+- Suffix: `-u3` (3 chars)
+- Available for iface prefix: 12 chars
+- Result: `ethernet-upli-u3`
+
+`uplinkmgr-setup` validates that no two macvlan names (after truncation) are identical.
+
+### 7.2 MAC Address Assignment
+
+Each macvlan interface `<internal-iface>-u<N>` (for uplink index `N` and internal interface index `M` in config-file order) gets MAC address:
+
+```
+52:<N>:<M>:00:00:00
+```
+
+- First octet `52` = `0x52` has bits `0b01010010`: bit 1 (LSB of first byte) = 0 (unicast), bit 2 = 1 (locally administered). This is a valid locally administered unicast MAC.
+- Second octet encodes the uplink index (0–255).
+- Third octet encodes the internal interface index (0–255).
+- Remaining octets are zero.
+
+This scheme supports up to 256 uplinks and 256 internal interfaces without collision.
+
+Example:
+- uplink 0, iface 0 (`vlan10-u0`): `52:00:00:00:00:00`
+- uplink 0, iface 1 (`vlan20-u0`): `52:00:01:00:00:00`
+- uplink 1, iface 0 (`vlan10-u1`): `52:01:00:00:00:00`
+- uplink 1, iface 1 (`vlan20-u1`): `52:01:01:00:00:00`
+
+### 7.3 Link-Local Address Assignment
+
+All macvlan interfaces for uplink index `N` (regardless of internal interface) get link-local address:
+
+```
+fe80::1:<N>
+```
+
+- Uplink 0 → `fe80::1:0`
+- Uplink 1 → `fe80::1:1`
+- Uplink 2 → `fe80::1:2`
+
+The `1:` prefix groups all uplinkmgr-managed router addresses into a recognisable block, distinct from `fe80::1` (the internal interface's own link-local) and from EUI-64-derived addresses. By using distinct link-local addresses, clients that have multiple next-hop candidates can distinguish them at the IPv6 layer, enabling correct source address selection per RFC 6724 rule 5.5.
+
+EUI-64 auto-generation is disabled on each macvlan interface before the link-local is assigned:
+```sh
+sysctl -q net.ipv6.conf.<iface>.addr_gen_mode=1
+```
+This must be set before the interface is brought up, which is why it appears in the `pre-up` stanza.
+
+### 7.4 Routing Table Numbers and Names
+
+- Table numbers: `routing_table_start + uplink_index` (default: 160, 161, ...)
+- Table names: `uplinkmgr_<uplink-name>` (e.g., `uplinkmgr_comcast`, `uplinkmgr_starlink`)
+- Registered in `/etc/iproute2/rt_tables.d/uplinkmgr.conf`
+
+### 7.5 ip -6 Rule Priorities
+
+ip -6 rules are assigned priorities from `rule_priority_start` upward, one per macvlan interface, in the order: enumerate uplinks × enumerate internal interfaces.
+
+Example with 2 uplinks and 2 internal interfaces:
+- Priority 29000: `iif vlan10-u0 lookup uplinkmgr_comcast`
+- Priority 29001: `iif vlan20-u0 lookup uplinkmgr_comcast`
+- Priority 29002: `iif vlan10-u1 lookup uplinkmgr_starlink`
+- Priority 29003: `iif vlan20-u1 lookup uplinkmgr_starlink`
+
+The configured range `[rule_priority_start, rule_priority_start + 99]` limits the system to 100 ip -6 rules for uplinkmgr, supporting up to 50 (uplink, network) pairs, which is ample.
+
+### 7.6 SLA IDs for IPv6 PD
+
+When dhcpcd is configured to sub-delegate a received /56 (or other) prefix to macvlan interfaces, each internal interface gets a SLA ID equal to its 0-based index in the `networks:` list:
+- networks[0] (`home`/`vlan10`) → SLA ID 0 → first macvlan gets `<prefix>:0::/64`
+- networks[1] (`iot`/`vlan20`) → SLA ID 1 → second macvlan gets `<prefix>:1::/64`
+
+This is encoded in the dhcpcd config `ia_pd` directive (see §6.2).
+
+### 7.7 IPv4 Default Route Metrics
+
+Default: `100 * (uplink_index + 1)`
+- Uplink 0 (comcast): metric 100
+- Uplink 1 (starlink): metric 200
+
+If the `metric` field is specified in the YAML for an uplink, that value overrides the default.
+
+Constraints: Metrics must be unique across all uplinks (validated by `uplinkmgr-setup`). Lower metric = higher priority (the main table's route selection algorithm prefers lower metrics).
+
+---
+
+## 8. IPv4 Routing Behavior
+
+### 8.1 Normal State (all uplinks UP)
+
+Both uplinks have their default routes in the main table:
+
+```
+default via 192.168.1.1 dev eth0 metric 100    # comcast
+default via 10.0.0.1    dev eth1 metric 200    # starlink
+```
+
+All IPv4 traffic (from internal interfaces, NATed via nftables masquerade) exits through `eth0` (comcast, metric 100).
+
+### 8.2 Primary Uplink Fails
+
+The daemon removes the comcast default route from the main table:
+
+```
+default via 10.0.0.1 dev eth1 metric 200    # starlink (now the only route)
+```
+
+All IPv4 traffic now exits through `eth1`.
+
+### 8.3 Per-Uplink Routing Tables
+
+Each uplink also has its own routing table (maintained by the dhcpcd hook):
+
+Table `uplinkmgr_comcast` (160):
+```
+default via 192.168.1.1 dev eth0
+```
+
+Table `uplinkmgr_starlink` (161):
+```
+default via 10.0.0.1 dev eth1
+```
+
+These tables are used for:
+- IPv6 source-based policy routing (packets sourced from a specific uplink's prefix use that uplink's table)
+- Monitoring probes that need to go out a specific interface
+
+The daemon does **not** modify per-uplink table routes — those are managed entirely by the dhcpcd hook.
+
+### 8.4 NAT
+
+NAT configuration is the administrator's responsibility. `uplinkmgr-setup` generates a reference nftables fragment at `/etc/uplinkmgr/uplinkmgr-nat.nft.example` as a starting point, but does not apply it.
+
+The reference fragment masquerades all outbound traffic on WAN interfaces. Because dead uplinks have their default routes removed from the main table, traffic cannot reach those interfaces; masquerade rules for dead uplinks are never triggered even if left in place.
+
+---
+
+## 9. IPv6 Routing and Delegation Behavior
+
+### 9.1 Prefix Delegation Flow
+
+1. dhcpcd (per-uplink instance for `comcast`) sends a DHCPv6 PD request on `eth0`.
+2. The ISP assigns a prefix, e.g., `2001:db8:aaaa::/56`.
+3. dhcpcd sub-delegates:
+   - `2001:db8:aaaa:0000::/64` → `vlan10-u0` (SLA ID 0)
+   - `2001:db8:aaaa:0001::/64` → `vlan20-u0` (SLA ID 1)
+4. dhcpcd assigns the address `2001:db8:aaaa:0000::1:0/64` to `vlan10-u0` (using `fe80::1:0` as its link-local, the router address is formed from the interface's assigned global prefix + interface identifier from the link-local suffix... see verification item).
+5. The dhcpcd hook runs and:
+   - Adds `2001:db8:aaaa:0000::/64` to the per-uplink routing table via `vlan10-u0`
+   - Adds `2001:db8:aaaa:0001::/64` to the per-uplink routing table via `vlan20-u0`
+   - Installs ip -6 rules: `iif vlan10-u0 lookup uplinkmgr_comcast`
+6. radvd (comcast instance) reads the prefix from `vlan10-u0` and begins advertising:
+   - Prefix `2001:db8:aaaa:0000::/64` on `vlan10-u0` with `AdvDefaultPreference high`
+   - Default route via `fe80::1:0` (the macvlan's link-local)
+
+### 9.2 Client Behavior (RFC 6724 Rule 5.5)
+
+A client on `vlan10` receives RAs from:
+- `fe80::1` — the router's primary address, advertising ULA prefix (admin-configured)
+- `fe80::1:0` — `vlan10-u0`, advertising `2001:db8:aaaa:0000::/64` (comcast)
+- `fe80::1:1` — `vlan10-u1`, advertising `2001:db8:bbbb:0000::/64` (starlink, if IPv6-capable)
+
+The client auto-configures multiple global addresses via SLAAC. When sending a packet, it selects the source address per RFC 6724. Rule 5.5 ("Prefer outgoing interface") causes the client to prefer a source address whose "default router" (next-hop) matches the outgoing interface. Since each router has a distinct MAC and link-local, the client can correctly associate each global address with its router and select the correct source address when a specific uplink is desired.
+
+### 9.3 Policy Routing Enforcement
+
+When a packet arrives at `vlan10-u0` (sent by a client to `fe80::1:0`), the ip -6 rule `iif vlan10-u0 lookup uplinkmgr_comcast` directs it to the comcast routing table, ensuring it exits `eth0` regardless of the client's source address (as long as the packet arrived on the correct macvlan).
+
+This prevents a client that sends a packet to `fe80::1:0` (comcast router) from having the packet routed out `eth1` (starlink). It also means a client cannot accidentally use comcast's router as a default gateway for traffic that should use starlink.
+
+### 9.4 Optional Source Address Rejection
+
+If `reject_incompatible_src: true`, the per-uplink table has:
+```
+prohibit default metric 65535
+```
+
+This means: if a packet arrives on `vlan10-u0` (lookup rule matches) but has no specific route match (e.g., the destination is not covered by any prefix in the comcast table), it receives an ICMPv6 Destination Unreachable (code 6, "reject route") response. This prevents cross-contamination of source addresses.
+
+This is **disabled by default** because it may cause unexpected failures with misconfigured clients and is conservative to enable.
+
+### 9.5 Prefix Subdivision Invariant
+
+The SLA ID assignment is **fixed at config-file order** — it does not change if uplinks are added or removed. If the config changes (e.g., a new network is added), `uplinkmgr-setup` must be re-run and dhcpcd instances restarted to re-request PD with updated SLA IDs.
+
+---
+
+## 10. Monitoring and State Machine
+
+### 10.1 State Machine
+
+Each uplink has **two independent state machines**: one for IPv4, one for IPv6. IPv6 state is only tracked if `ipv6_pd: true`.
+
+States: `UP`, `DOWN`
+
+Counters: `consecutive_failures` (used in UP state), `consecutive_successes` (used in DOWN state)
+
+```
+         ┌────────────────────────────────────────────────────────┐
+         │                                                        │
+         ▼     probe success                                      │
+       ┌────┐  (reset consecutive_failures)                       │
+  ───▶ │ UP │─────────────────────────────────────────────────────┤
+       └────┘                                                      │
+         │     probe failure                                       │
+         │     (increment consecutive_failures)                    │
+         │     consecutive_failures >= failure_threshold           │
+         │     → run deprovisioning                                │
+         ▼                                                        │
+       ┌──────┐  probe failure                                     │
+       │ DOWN │  (reset consecutive_successes)                     │
+       └──────┘                                                     │
+         │     probe success                                        │
+         │     (increment consecutive_successes)                   │
+         │     consecutive_successes >= recovery_threshold         │
+         │     → run reprovisioning                                │
+         └────────────────────────────────────────────────────────┘
+```
+
+Transition to DOWN: when `consecutive_failures` reaches `failure_threshold` (default: 3).
+Transition to UP: when `consecutive_successes` reaches `recovery_threshold` (default: 3).
+
+Counter semantics:
+- In `UP` state: `consecutive_failures` increments on each failed probe, resets to 0 on any successful probe.
+- In `DOWN` state: `consecutive_successes` increments on each successful probe, resets to 0 on any failed probe.
+- On state transition, both counters reset to 0.
+
+### 10.2 IPv4 Probe Detail
+
+```sh
+ping -c 1 -W 2 -I <wan-iface> <host>
+```
+
+- `-c 1`: Send one packet.
+- `-W 2`: Wait 2 seconds for a reply.
+- `-I <wan-iface>`: Bind to the WAN interface (forces use of the WAN default route for this uplink).
+
+All hosts in `monitor.v4_hosts` are probed. The probe **passes** if any host responds (`exit 0`). The probe **fails** if all hosts fail.
+
+The daemon runs probes sequentially within a probe cycle. All probes for all uplinks complete within a single `interval` period.
+
+**Precondition for IPv4 probing:** The uplink's IPv4 state file (`/run/uplinkmgr/<name>.ipv4.state`) must exist (i.e., dhcpcd has successfully obtained an IPv4 lease). If the state file does not exist, the probe is skipped and the current state is maintained (not transitioned).
+
+### 10.3 IPv6 Probe Detail
+
+```sh
+ping6 -c 1 -W 2 -I <wan-iface> <host>
+```
+
+- `-I <wan-iface>`: Binds the socket to the WAN interface. The kernel selects the route from the per-uplink routing table (via the ip -6 rule installed by the hook). This is the correct behavior — it probes the path that clients would use for this uplink.
+
+All hosts in `monitor.v6_hosts` are probed. Pass/fail logic is the same as IPv4.
+
+**Precondition for IPv6 probing:** `ipv6_pd: true` AND the per-uplink routing table contains an IPv6 default route (i.e., the hook has processed a ROUTERADVERT event). The daemon checks for the route's presence via `ip -6 route show table <table_num>` before attempting probes.
+
+### 10.4 Probe Execution
+
+The daemon uses Python's `subprocess` module to run ping commands. Each probe has a timeout matching `-W <value>` plus a small buffer (0.5s) to handle OS overhead. If the subprocess exceeds this timeout, it is killed and the probe is counted as a failure.
+
+The daemon runs all probes for all uplinks in a single cycle before sleeping. Probes for different uplinks run sequentially (not in parallel) to simplify error handling, though this may be optimized in a future version.
+
+---
+
+## 11. Provisioning and Deprovisioning Sequences
+
+### 11.1 IPv4 Deprovisioning (UP → DOWN)
+
+1. Read the gateway from `/run/uplinkmgr/<name>.ipv4.state`.
+2. Remove the IPv4 default route from the main table:
+   ```sh
+   ip route del default via <GW4> dev <wan-iface> metric <metric>
+   ```
+3. Record the removal in `/run/uplinkmgr/<name>.runtime` (for cleanup on daemon stop).
+4. Log the event: `uplink <name> IPv4 DOWN after <N> consecutive failures`.
+
+### 11.2 IPv4 Reprovisioning (DOWN → UP)
+
+1. Read the gateway from `/run/uplinkmgr/<name>.ipv4.state`.
+   - If the state file does not exist (dhcpcd has not yet obtained a lease), log a warning and skip. The daemon will retry on the next cycle.
+2. Add the IPv4 default route to the main table:
+   ```sh
+   ip route replace default via <GW4> dev <wan-iface> metric <metric>
+   ```
+3. Update `/run/uplinkmgr/<name>.runtime`.
+4. Log the event: `uplink <name> IPv4 UP after <N> consecutive successes`.
+
+### 11.3 IPv6 Deprovisioning (UP → DOWN)
+
+1. Regenerate the radvd config for this uplink with DOWN-state parameters:
+   - `AdvDefaultPreference low`
+   - `AdvRoutePreference low`
+   - `AdvPreferredLifetime 0`
+   - `AdvValidLifetime 1800`
+   
+   The regeneration algorithm for any given radvd config file:
+   - Determine this uplink's state: DOWN.
+   - Determine the "priority rank" among UP uplinks: not applicable (this uplink is DOWN).
+   - Write the config with DOWN-state values.
+
+2. Write the new config atomically:
+   ```python
+   tmp = f"/etc/radvd/radvd-uplinkmgr-{name}.conf.tmp"
+   with open(tmp, 'w') as f:
+       f.write(generated_config)
+   os.rename(tmp, f"/etc/radvd/radvd-uplinkmgr-{name}.conf")
+   ```
+
+3. Send SIGHUP to the radvd instance:
+   ```sh
+   systemctl kill --signal=SIGHUP radvd-uplinkmgr-<name>.service
+   ```
+
+4. Optionally (if `reject_incompatible_src`): The prohibit default should already be in the per-uplink table from the hook; no action needed.
+
+5. Log the event: `uplink <name> IPv6 DOWN`.
+
+### 11.4 IPv6 Reprovisioning (DOWN → UP)
+
+1. Regenerate **all** IPv6 uplink radvd configs (this uplink's recovery may change other uplinks' tiers), writing accurate remaining lifetimes from state files.
+
+2. Write configs atomically and SIGHUP all IPv6 radvd instances (preference change only; radvd's live counters are unaffected).
+
+3. Log the event: `uplink <name> IPv6 UP`.
+
+### 11.5 radvd Config Regeneration Algorithm
+
+The daemon uses this algorithm on both triggers (state change → SIGHUP; SIGUSR1 → restart):
+
+```python
+import ipaddress, time
+
+now = time.time()
+ipv6_uplinks = [u for u in uplinks if u.ipv6_pd]
+up_ipv6_uplinks = sorted(
+    [u for u in ipv6_uplinks if u.ipv6_state == 'UP'],
+    key=lambda u: u.index
+)
+highest_priority_v6 = up_ipv6_uplinks[0] if up_ipv6_uplinks else None
+
+for uplink in ipv6_uplinks:
+    # Router lifetime (from upstream RA)
+    gw_state = read_state(f"{uplink.name}.ipv6gw.state")
+    nd1_remaining = (
+        max(0, gw_state.nd1_lifetime - (now - gw_state.timestamp))
+        if gw_state else 1800  # conservative fallback
+    )
+
+    # Delegated prefix and lifetime (from WAN BOUND6/RENEW6)
+    pd_state = read_state(f"{uplink.name}.ipv6pd.state")
+
+    if uplink.ipv6_state == 'DOWN':
+        preference = 'low'
+        preferred_lifetime = 0
+        valid_lifetime = 1800
+        prefix_info = _derive_prefix_info(pd_state, uplink, now)
+    else:
+        preference = 'high' if uplink == highest_priority_v6 else 'medium'
+        prefix_info = _derive_prefix_info(pd_state, uplink, now)
+
+    generate_radvd_config(uplink, preference, nd1_remaining,
+                          preferred_lifetime, valid_lifetime, prefix_info)
+
+def _derive_prefix_info(pd_state, uplink, now):
+    """Return list of {iface, prefix, vltime, pltime} for each macvlan, or None entries."""
+    if pd_state is None:
+        return [None] * len(uplink.macvlan_ifaces)
+
+    delegated = ipaddress.ip_network(
+        f"{pd_state.delegated_prefix}/{pd_state.delegated_length}", strict=False
+    )
+    sla_bits = 64 - pd_state.delegated_length  # number of bits available for SLA IDs
+    vltime = max(0, pd_state.vltime - (now - pd_state.timestamp))
+    pltime = max(0, pd_state.pltime - (now - pd_state.timestamp))
+
+    result = []
+    for sla_id, iface in enumerate(uplink.macvlan_ifaces):
+        subnet_addr = delegated.network_address + (sla_id << sla_bits)
+        prefix = ipaddress.ip_network(f"{subnet_addr}/64")
+        result.append({'iface': iface, 'prefix': prefix, 'vltime': vltime, 'pltime': pltime})
+    return result
+```
+
+### 11.6 AdvDefaultLifetime and AdvRouteLifetime
+
+Both `AdvDefaultLifetime` (the Router Lifetime field in the RA header) and `AdvRouteLifetime` (for the explicit `::/0` route block) are set to the **remaining `nd1_lifetime`** sourced from `<uplink-name>.ipv6gw.state`. This propagates the upstream router's validity window directly to clients.
+
+`AdvDefaultLifetime` is **not** zeroed on downstate — the router remains reachable as a last resort. Only `AdvPreferredLifetime 0` is used to signal clients away from the failed uplink's prefix while preserving existing connections.
+
+---
+
+## 12. Boot-Time Behavior
+
+### 12.1 Design Constraint
+
+Debian 13's `network-online.target` (and systemd's `wait-online` logic) will cause a 5-minute boot timeout if the network appears to not be configured. To prevent this, IPv4 connectivity must be available **before** `uplinkmgr.service` starts and without depending on the daemon.
+
+### 12.2 Boot Sequence
+
+1. **ifupdown runs** (`/etc/init.d/networking start` or `networking.service`): Brings up all `auto` interfaces, including macvlan interfaces defined in `/etc/network/interfaces.d/uplinkmgr`.
+
+2. **`dhcpcd-uplinkmgr-<name>.service` units start** for each uplink (ordered by systemd based on `After=` dependencies). Each unit runs a persistent dhcpcd instance that:
+   - Obtains an IPv4 lease on the WAN interface.
+   - Adds the default route to the main table with the configured metric.
+   - Runs the dhcpcd hook, which writes the gateway state file and adds routes to the per-uplink table.
+   - (If `ipv6_pd: true`) Requests prefix delegation and sub-delegates to macvlan interfaces.
+
+3. **`radvd-uplinkmgr-<name>.service` units start** (after their corresponding dhcpcd units). radvd begins advertising prefixes on macvlan interfaces.
+
+4. **`uplinkmgr.service` starts** (after all dhcpcd units, per `Before=uplinkmgr.service` in dhcpcd unit files). The daemon begins monitoring. At this point, routes are already configured; the daemon's initial state is `UP` for all uplinks.
+
+**Result:** IPv4 connectivity is available as soon as any dhcpcd instance obtains a lease (step 2), long before the daemon starts. Debian's boot does not time out waiting for the network.
+
+### 12.3 Route Redundancy at Boot
+
+If both uplinks are functional at boot, both default routes are in the main table simultaneously (with different metrics). The highest-priority uplink's route is selected by the kernel. The daemon, when it starts, confirms their health and takes no action.
+
+If an uplink fails before the daemon starts, its dhcpcd instance either:
+- Never obtains a lease (route never added), or
+- Obtains a lease and adds the route, then the daemon removes it after 3 failures.
+
+In the failure-before-daemon-start case, the bad route may briefly be active until the daemon deprovisions it. This is acceptable — boot-time recovery is secondary to availability.
+
+---
+
+## 13. Daemon Lifecycle and Cleanup
+
+### 13.1 Startup
+
+See §5.3.8.
+
+### 13.2 Normal Operation
+
+The daemon runs its monitoring loop continuously. All mutations to the system state are logged (to stderr/journald via the systemd unit).
+
+### 13.3 Stop / SIGTERM Handling
+
+When the daemon receives SIGTERM (or is stopped by `systemctl stop uplinkmgr`):
+
+1. **Re-add any IPv4 default routes that were removed:** For each uplink whose IPv4 state the daemon has set to DOWN:
+   - Read the gateway from the state file.
+   - If the state file exists and the route is not already present:
+     ```sh
+     ip route replace default via <GW4> dev <wan-iface> metric <metric>
+     ```
+
+2. **Regenerate all radvd configs to "everything up" state:** Regenerate all radvd config files as if all IPv6 uplinks are UP. Assign preference tiers by uplink priority (index 0 = high, others = medium). Write all configs atomically.
+
+3. **Send SIGHUP to all radvd instances:**
+   ```sh
+   systemctl kill --signal=SIGHUP radvd-uplinkmgr-<name>.service
+   ```
+   for each IPv6 uplink.
+
+4. **Remove runtime files:**
+   ```sh
+   rm -f /run/uplinkmgr/*.runtime
+   ```
+
+5. Exit 0.
+
+**Rationale:** On daemon stop, the system should return to its "configured and optimistic" state. All routes are present and all radvd instances advertise with restored preferences. This allows the administrator to stop the daemon for maintenance without disrupting connectivity.
+
+### 13.4 What the Daemon Does NOT Clean Up
+
+- Per-uplink routing table entries (managed by dhcpcd hook)
+- ip -6 rules (managed by dhcpcd hook)
+- macvlan interfaces (managed by ifupdown)
+- dhcpcd leases or processes (managed by systemd)
+- radvd processes (managed by systemd)
+- nftables rules (administrator's responsibility)
+
+### 13.5 SIGHUP Handling (Daemon)
+
+If the daemon itself receives SIGHUP, it reloads the config file and resets all state to UP. This is useful for applying config changes without a full restart.
+
+---
+
+## 14. Debian Package Structure
+
+### 14.1 Package Name
+
+`uplinkmgr`
+
+### 14.2 Dependencies
+
+```
+Depends: python3 (>= 3.9), dhcpcd5, radvd, iproute2, iputils-ping, ifupdown
+```
+
+**Notes:**
+- `dhcpcd5` is the Debian 13 (Trixie) package name for dhcpcd.
+- `iputils-ping` provides `ping` and `ping6` (or `ping` with IPv6 support — confirm on Debian 13 (Trixie)).
+- `ifupdown` is needed for the interfaces.d mechanism.
+- Python 3.9+ is required for type hints and `importlib.resources` usage.
+
+### 14.3 Installed File Paths
+
+| File | Path |
+|------|------|
+| Daemon binary | `/usr/sbin/uplinkmgr` |
+| Setup binary | `/usr/sbin/uplinkmgr-setup` |
+| dhcpcd hook | `/lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr` |
+| systemd service | `/lib/systemd/system/uplinkmgr.service` |
+| Default config | `/etc/uplinkmgr/uplinkmgr.yaml` (not overwritten on upgrade) |
+| Debconf templates | `/usr/share/uplinkmgr/templates` |
+
+Generated files (written by `uplinkmgr-setup`, not by the package directly) are listed in §5.1.3.
+
+### 14.4 `uplinkmgr.service`
+
+```ini
+[Unit]
+Description=uplinkmgr multi-WAN uplink monitor daemon
+After=network.target
+# dhcpcd-uplinkmgr-*.service units declare Before=uplinkmgr.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/uplinkmgr
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=10s
+RuntimeDirectory=uplinkmgr
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`RuntimeDirectory=uplinkmgr` causes systemd to create `/run/uplinkmgr/` with the correct permissions before starting the daemon, and clean it up on stop.
+
+### 14.5 `postinst` Script
+
+The `postinst` script (run after package installation) performs:
+
+1. If `/etc/uplinkmgr/uplinkmgr.yaml` does not exist, install the default example config.
+2. Run `uplinkmgr-setup` to generate all config files from the (example) config.
+3. Reload systemd daemon: `systemctl daemon-reload`
+4. **Disable the system-default dhcpcd instance** to prevent conflicts with the per-uplink instances: `systemctl disable --now dhcpcd.service` (if it exists and is enabled). Per-uplink dhcpcd instances conflict with a system-wide instance; uplinkmgr manages dhcpcd entirely through its own units.
+5. Enable and start each generated `dhcpcd-uplinkmgr-*.service` unit.
+6. Enable and start each generated `radvd-uplinkmgr-*.service` unit.
+7. Enable and start `uplinkmgr.service`.
+
+On upgrade (`$1 = configure` with a previous version), `postinst`:
+1. Runs `uplinkmgr-setup` to regenerate files (picks up any format changes).
+2. Reloads systemd daemon.
+3. Restarts (does not start) the daemon if it is already running.
+
+### 14.6 `postrm` Script
+
+On purge (`$1 = purge`):
+1. Stop and disable all `dhcpcd-uplinkmgr-*.service`, `radvd-uplinkmgr-*.service`, and `uplinkmgr.service`.
+2. Remove all files generated by `uplinkmgr-setup` in `/etc/network/interfaces.d/`, `/etc/dhcpcd-uplinkmgr-*.conf`, `/etc/systemd/system/dhcpcd-uplinkmgr-*.service`, etc.
+3. Remove `/etc/iproute2/rt_tables.d/uplinkmgr.conf`.
+4. Remove `/etc/uplinkmgr/` directory (including config, on purge only).
+5. Reload systemd: `systemctl daemon-reload`.
+
+On remove (`$1 = remove`): Stop and disable services; remove generated files but leave `/etc/uplinkmgr/` intact.
+
+**Note:** `postrm` does not re-enable `dhcpcd.service`. If the administrator wants the system-default dhcpcd instance restored after removing uplinkmgr, they must do so manually.
+
+### 14.7 `dpkg-reconfigure` Support
+
+Debconf is used to display a confirmation prompt when `dpkg-reconfigure uplinkmgr` is run. The `config` script prompts: "Run uplinkmgr-setup to regenerate config files from /etc/uplinkmgr/uplinkmgr.yaml? [yes/no]". If yes, `postinst` calls `uplinkmgr-setup`.
+
+### 14.8 Python Packaging
+
+The Python components (`uplinkmgr` daemon and `uplinkmgr-setup`) are installed as executable scripts pointing to Python modules. Using `dh_python3` for build-time dependency handling. The package does not use a virtual environment — it relies on system Python.
+
+Module structure:
+```
+/usr/lib/python3/dist-packages/uplinkmgr/
+    __init__.py
+    config.py      # YAML config parsing and validation
+    naming.py      # Naming convention utilities (shared by daemon and setup)
+    generator.py   # Config file generation (used by uplinkmgr-setup and daemon)
+    daemon.py      # Main daemon loop
+    monitor.py     # Probe logic
+    statemachine.py # Uplink state machine
+    routing.py     # ip route/rule manipulation
+    radvd.py       # radvd config generation and SIGHUP
+```
+
+`/usr/sbin/uplinkmgr` and `/usr/sbin/uplinkmgr-setup` are thin entry-point scripts.
+
+---
+
+## 15. Comparison with systemd-networkd
+
+### 15.1 Overview
+
+systemd-networkd is the networking daemon included with systemd, which provides interface management, DHCP client/server, IPv6 RA handling, and basic policy routing. This section evaluates whether it could replace the ifupdown + dhcpcd approach used by uplinkmgr.
+
+### 15.2 What systemd-networkd Can Do Natively (Debian 13 (Trixie))
+
+**Interface management via .netdev and .network files:**
+- Macvlan interfaces can be created declaratively using `.netdev` files with `Kind=macvlan`.
+- IPv4 and IPv6 DHCP are supported natively in `.network` files (`DHCP=yes`, `DHCP=ipv4`, `DHCP=ipv6`).
+- No need for ifupdown `pre-up`/`up`/`down` stanzas.
+
+**IPv6 Prefix Delegation:**
+- Since systemd 246 (available in Debian 11+), `.network` files support `DHCPPrefixDelegation=yes` on the WAN interface and `IPv6PrefixDelegationConfig=DHCPv6` on downstream interfaces.
+- This is functional on Debian 13 (Trixie), but has had bugs and behavioral changes across systemd versions.
+- SLA IDs can be specified via `SubnetId=` in the downstream interface's `.network` file.
+
+**Policy routing:**
+- `.network` files support `RoutingPolicyRule` sections for both IPv4 and IPv6.
+- This can express `ip rule` equivalents, including `IncomingInterface=` (iif).
+- Rules are automatically added and removed when the interface comes up/down.
+
+**Route metrics:**
+- `RouteMetric=` can be set per interface in `.network` files, controlling the metric of DHCP-assigned default routes.
+
+**Per-uplink routing tables:**
+- Can be specified in `.network` files using `Table=` in `[Route]` sections.
+
+**Summary:** systemd-networkd can handle macvlan creation, DHCP, IPv6 PD sub-delegation, metric-ordered default routes, and policy routing rules — all without external tools.
+
+### 15.3 What systemd-networkd Cannot Do or Does Poorly
+
+**radvd is still external:**
+- systemd-networkd does not include a router advertisement daemon for downstream interfaces. A separate radvd (or `ndisc6`/`ndppd`) instance is still required for advertising prefixes to clients via SLAAC.
+- `AdvDefaultPreference`/`AdvRoutePreference` management based on uplink health still requires custom code regardless of which DHCP client is used.
+- The fine-grained radvd lifecycle management (SIGHUP on config change, per-uplink config regeneration) is the same complexity whether using systemd-networkd or dhcpcd.
+
+**networkd-dispatcher is less mature than dhcpcd hooks:**
+- `networkd-dispatcher` provides event hooks analogous to dhcpcd's exit hooks, but it is a separate package (`networkd-dispatcher`), must be installed separately, and is less widely tested for complex multi-interface scenarios.
+- The dhcpcd hook model is more mature, better documented for complex PD scenarios, and has a richer event taxonomy (BOUND, RENEW, REBIND, ROUTERADVERT, BOUND6, etc.).
+- networkd-dispatcher fires on interface state changes (routable, degraded, etc.), not on DHCP lease events directly, which is a coarser granularity.
+
+**systemd-resolved conflicts:**
+- systemd-networkd is tightly integrated with systemd-resolved, which replaces `/etc/resolv.conf` with a stub resolver (`127.0.0.53`). This conflicts with the conventional DHCP-managed DNS in `/etc/resolv.conf`.
+- On a router serving DNS to clients (e.g., via dnsmasq or a forwarding resolver), this creates a complex layering issue that requires explicit configuration to bypass.
+- dhcpcd writes directly to `/etc/resolv.conf` or a managed file, which is simpler for router use cases.
+
+**Debug visibility is lower:**
+- With ifupdown + dhcpcd, the entire configuration is explicit in text files under `/etc/network/interfaces.d/` and `/etc/dhcpcd-uplinkmgr-*.conf`. Each step can be inspected, replayed, and debugged independently.
+- With systemd-networkd, the effective configuration is a composite of `.network` and `.netdev` files processed by a daemon. `networkctl status`, `journalctl -u systemd-networkd`, and `networkctl lldp` provide inspection, but there is no equivalent of "run this one command and see what happens."
+- For a multi-uplink router with complex policy routing, this opacity increases the difficulty of diagnosing subtle routing bugs.
+
+**IPv6 PD experimental status:**
+- The `DHCPPrefixDelegation=` feature has had bugs and behavioral changes across systemd versions (241 through 255+). On a stable Debian 13 (Trixie) system that will not receive updated systemd until the next major release, bugs in PD handling may not be patched.
+- dhcpcd has a long track record with IPv6 PD on embedded and router use cases.
+
+**Migration cost:**
+- The ifupdown + dhcpcd approach is already familiar to Debian administrators. Switching to systemd-networkd requires learning a new configuration language and debugging toolchain.
+- On a running production router, migrating from ifupdown to systemd-networkd carries real risk of network outage.
+
+### 15.4 Version-Specific Notes (Debian 13 (Trixie))
+
+| Feature | Status |
+|---------|----------------------|
+| Macvlan via .netdev | Stable |
+| DHCP (IPv4 and IPv6) | Stable |
+| DHCPv6 PD (outbound request) | Functional, previously experimental |
+| DHCPv6 PD downstream sub-delegation | Functional (SubnetId=), some edge case bugs |
+| RoutingPolicyRule (IPv4 and IPv6) | Functional |
+| Per-table routes via Table= | Functional |
+| RouteMetric= | Stable |
+| networkd-dispatcher | Separate package, functional |
+| Integration with systemd-resolved | Enabled by default (may conflict) |
+
+### 15.5 Conclusion
+
+systemd-networkd is now viable for the static/semi-permanent configuration aspects of uplinkmgr (interface creation, DHCP, PD, policy routing rules). It is no longer as immature as it was in Debian 9/10.
+
+However:
+1. **It does not eliminate the need for the uplinkmgr daemon.** The daemon's monitoring, radvd lifecycle management, and AdvDefaultPreference logic are required regardless of which DHCP client is used. The daemon complexity is the same either way.
+2. **The migration cost is non-trivial.** Switching from ifupdown to systemd-networkd on a production router requires testing and carries outage risk.
+3. **Debug visibility is higher with ifupdown + dhcpcd.** For a complex multi-uplink router, this is a meaningful operational advantage.
+4. **systemd-resolved integration is a net negative** for a router use case, and requires careful configuration to avoid conflicts.
+
+**Decision:** ifupdown + dhcpcd is the right choice for this project. The decision is not based on systemd-networkd being immature — it is based on a better fit for the operational characteristics of a router, better debuggability, and a simpler migration path from standard Debian networking.
+
+---
+
+## 16. Constraints, Invariants, and Known Limitations
+
+### 16.1 Hard Constraints
+
+1. **Interface name length:** All derived macvlan names must be ≤ 15 characters. `uplinkmgr-setup` enforces this.
+2. **Routing table number uniqueness:** Table numbers `[routing_table_start, routing_table_start + len(uplinks) - 1]` must not conflict with any existing table definitions.
+3. **Uplink name uniqueness:** Uplink names must be unique. This is enforced at config parse time.
+4. **dhcpcd instance isolation:** Each per-uplink dhcpcd instance must only manage its designated interfaces (`allowinterfaces`). Running dhcpcd without this restriction on a multi-interface system will cause it to manage all interfaces, conflicting with other instances.
+5. **Hook idempotency:** The dhcpcd hook must be safe to run multiple times for the same event (e.g., RENEW after BOUND). It uses `replace` semantics for route operations (`ip route replace`, `ip rule del ... || true; ip rule add ...`).
+6. **Daemon optimistic start:** The daemon must not deprovision uplinks at startup. Routes are assumed to be correctly configured by dhcpcd before the daemon starts.
+
+### 16.2 Ordering Invariants
+
+- `uplinkmgr-setup` must be run before any dhcpcd or radvd instances are started (it generates their configs).
+- dhcpcd instances must be running before the uplinkmgr daemon starts (daemon reads state files written by the hook).
+- radvd instances must be running before clients attempt SLAAC (they need to receive RAs immediately on link-up).
+
+### 16.3 Known Limitations
+
+1. **DHCP-only WAN:** Only DHCP WAN uplinks are supported. PPPoE and static WAN configurations are out of scope.
+2. **IPv6 PD only:** IPv6 is only provisioned if the WAN provides prefix delegation. Uplinks with `ipv6_pd: false` are IPv4-only; there is no fallback to SLAAC-from-WAN or static IPv6.
+3. **Single delegated prefix per uplink:** The design assumes one prefix delegation per uplink. If an ISP provides multiple prefixes, only the first is used.
+4. **No probe parallelism:** Probes are run sequentially. With many uplinks and many probe hosts, a single monitoring cycle could take longer than `monitor.interval`. The implementation should log a warning if a cycle takes longer than the interval.
+5. **radvd `prefix ::/64` fallback:** The initial radvd config (generated by `uplinkmgr-setup`) uses `prefix ::/64` as a placeholder until the first PD is received. If radvd cannot derive the delegated prefix automatically from the macvlan interface's assigned address, clients will not receive a useful prefix until the daemon regenerates the config after the first SIGUSR1 from the hook. This is a boot-time-only window.
+6. **Restart gap on lifetime refresh:** When the daemon restarts a radvd instance to apply fresh lifetimes (on SIGUSR1), there is a brief window (typically < 1 second) during which radvd is not sending RAs. Clients will not notice a gap this short. There is also a sub-second race between the daemon computing remaining lifetimes and radvd starting its countdown from those values, meaning advertised lifetimes may be very slightly longer than the upstream values.
+7. **Asymmetric uplink indices after config change:** If an uplink is removed from the middle of the `uplinks:` list, all subsequent uplinks' indices, MACs, link-locals, and routing table numbers change. This requires a full re-run of `uplinkmgr-setup`, restart of all affected services, and the administrator should be warned that existing client addresses become stale.
+8. **dhcpcd multi-instance removed in dhcpcd 11:** Starting with dhcpcd 11, running separate dhcpcd processes per interface is being removed in favor of a single daemon managing all interfaces ("manager mode", available since dhcpcd 5 but not yet mandatory). The replacement pattern is: start one dhcpcd daemon with `--deny-interfaces='*'`, then command it to adopt specific interfaces as needed. uplinkmgr's per-uplink systemd unit structure will need to be replaced with a single managed service unit, though `dhcpcd.conf` content remains compatible. Out of scope for this version (targets dhcpcd 10.1 on Debian 13 (Trixie)). See: https://github.com/NetworkConfiguration/dhcpcd/discussions/271
+9. **NAT not automatic:** `uplinkmgr-setup` generates a reference nftables fragment at `/etc/uplinkmgr/uplinkmgr-nat.nft.example` but does not apply it. The administrator is responsible for incorporating NAT rules into their firewall configuration.
+
+### 16.4 Security Considerations
+
+- The dhcpcd hook script runs as root (dhcpcd runs as root). The env files in `/etc/uplinkmgr/uplinks/` must be readable only by root (`chmod 600`) since they could be used to influence hook behavior.
+- `/run/uplinkmgr/` contains gateway IP addresses (state files). These are not sensitive but should be owned by root.
+- uplinkmgr does not configure any firewall rules. The administrator is responsible for NAT and inbound filtering. The reference fragment at `/etc/uplinkmgr/uplinkmgr-nat.nft.example` provides a starting point for masquerade rules.
+
+---
+
+## 17. Open Verification Items
+
+The following items require verification against upstream documentation or testing on the target platform (Debian 13 (Trixie), dhcpcd 10.1, radvd 2.19) before implementation.
+
+| # | Component | Item | Where to Verify |
+|---|-----------|------|----------------|
+| 1 | dhcpcd hook | ~~Exact variable names for IPv6 PD prefix, vltime, and pltime~~ **Confirmed:** PD variables are on the **WAN interface** BOUND6/RENEW6 event (not macvlan events): `$dhcp6_ia_pd1_prefix1`, `$dhcp6_ia_pd1_prefix1_length`, `$dhcp6_ia_pd1_prefix1_vltime`, `$dhcp6_ia_pd1_prefix1_pltime`. Delegated prefix length may be less than 64 (e.g. /60). | — |
+| 2 | dhcpcd hook | ~~Variable holding the RA source address and router lifetime for `ROUTERADVERT` events~~ **Confirmed:** `$nd1_from` (gateway / RA source address), `$nd1_lifetime` (router lifetime in seconds). | — |
+| 3 | dhcpcd config | ~~`ia_pd` directive syntax~~ **Confirmed:** `ia_pd <IAID>/<requested-prefix>/<hint-length> <iface>/<SLA-ID>/64 ...` — e.g., `ia_pd 2/::/56 vlan10-u0/0/64 vlan20-u0/1/64`. `ia_na <IAID>` is also required to obtain an IPv6 address on the WAN interface. `ipv6rs` is needed to trigger ROUTERADVERT events. `duid` ensures consistent lease assignment. | — |
+| 4 | dhcpcd config | ~~`allowinterfaces` directive~~ **Confirmed:** `allowinterfaces` is correct in dhcpcd 10.x. Note: starting with dhcpcd 11, multi-instance support is expected to be removed in favor of a single-instance "manager mode"; this will require redesign if a future Debian target ships dhcpcd 11+. Out of scope for this spec (targets dhcpcd 10.1). | — |
+| 5 | dhcpcd binary | ~~Correct path on Debian 13 (Trixie)~~ **Confirmed:** `/usr/sbin/dhcpcd`. | — |
+| 6 | dhcpcd binary | ~~Flags `--config`, `--pidfile`, `--nobackground` in dhcpcd 10.x~~ **Confirmed:** `--config` and `--nobackground` are correct. `--pidfile` is not accepted — dhcpcd writes its pid to `/run/dhcpcd/<iface>.pid` when an interface is given as a positional argument. Systemd unit updated accordingly. | — |
+| 7 | radvd | ~~Whether radvd re-reads config on SIGHUP~~ **Confirmed:** radvd re-reads config on SIGHUP (standard Unix daemon behavior; consistent with item 17 — counters continue from where they were). Note: dhcpcd does **not** support config reload via SIGHUP; `systemctl restart` is required when the dhcpcd config changes (only after re-running `uplinkmgr-setup`). | — |
+| 8 | radvd | ~~Whether `prefix ::/64` with `AdvRouterAddr on` causes radvd to auto-use the interface's assigned /64 prefix~~ **Assumed correct:** each macvlan interface has exactly one global address assigned via PD, so radvd should pick it up unambiguously. To be verified by testing. | — |
+| 9 | radvd binary | ~~Correct command-line flags: `--nodaemon`, `--config`, `--pidfile`, `--configtest` on Debian 13's radvd 2.19~~ **Confirmed:** all four flags are correct. | — |
+| 10 | ifupdown | ~~Whether `inet manual` ifaces with only `pre-up`/`up`/`down` stanzas are processed correctly; whether `auto` is needed~~ **Confirmed:** `inet manual` ifaces accept `pre-up`/`up`/`down`/`post-down` stanzas; `auto` is required to activate them at boot. | — |
+| 11 | nftables | ~~Whether `/etc/nftables.d/` exists and is included by default in Debian 13's `/etc/nftables.conf`~~ **Resolved:** `/etc/nftables.d/` is not created by the nftables package and is not loaded by default. nftables.service may also be disabled on install. NAT configuration is left entirely to the administrator; uplinkmgr-setup generates a reference fragment only. | — |
+| 12 | iproute2 | ~~Behavior when `ip route add` is called for a route that already exists~~ **Confirmed:** `ip route add` errors on a duplicate route. All route installation uses `ip route replace` throughout. | — |
+| 13 | kernel | ~~Behavior of `addr_gen_mode=1` set in `pre-up` — whether it persists after the interface is deleted and recreated~~ **Resolved:** set it unconditionally in every `pre-up` stanza regardless of prior state. | — |
+| 14 | ping | ~~Whether `ping6` is available separately or merged into `ping` on Debian 13's `iputils-ping`~~ **Confirmed:** `ping6` is provided by `iputils-ping`. | — |
+| 15 | dhcpcd | ~~Whether per-uplink dhcpcd instances conflict with a system-default dhcpcd instance~~ **Resolved:** they likely conflict; the system-default `dhcpcd.service` is disabled by `postinst` on install. There is no reason to run both. | — |
+| 16 | iproute2 | ~~Whether `ip -6 route replace … expires <seconds>` is valid syntax for setting route expiry in iproute2 on Debian 13 (Trixie)~~ **Confirmed:** correct syntax. | — |
+| 17 | radvd | ~~Whether radvd resets `DecrementLifetimes` counters to the config-file values on SIGHUP, or continues counting from where they were~~ **Confirmed:** SIGHUP does not reset counters; they continue decrementing from where they were. Config values are only applied at (re)start. Daemon uses SIGHUP for preference changes and `systemctl restart` for lifetime refreshes. | — |
+
+---
+
+*End of specification.*

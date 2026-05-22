@@ -1,0 +1,24 @@
+#!/usr/bin/make -f
+
+export PYBUILD_NAME = uplinkmgr
+
+%:
+	dh $@ --with python3 --buildsystem=pybuild
+
+override_dh_auto_install:
+	dh_auto_install
+	# Entry-point scripts
+	install -d debian/uplinkmgr/usr/sbin
+	install -m 755 bin/uplinkmgr bin/uplinkmgr-setup \
+	    debian/uplinkmgr/usr/sbin/
+	# dhcpcd hook
+	install -d debian/uplinkmgr/lib/dhcpcd/dhcpcd-hooks
+	install -m 755 hooks/50-uplinkmgr \
+	    debian/uplinkmgr/lib/dhcpcd/dhcpcd-hooks/
+	# Example config
+	install -d debian/uplinkmgr/etc/uplinkmgr
+	install -m 644 etc/uplinkmgr/uplinkmgr.yaml.example \
+	    debian/uplinkmgr/etc/uplinkmgr/
+
+# dh_installsystemd handles the uplinkmgr.service unit automatically
+# (picks it up from debian/uplinkmgr.service).

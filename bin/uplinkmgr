@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""uplinkmgr — multi-WAN uplink monitor daemon."""
+
+import argparse
+import logging
+import sys
+
+from uplinkmgr import config as cfg_mod
+from uplinkmgr.daemon import Daemon, DEFAULT_STATE_DIR
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="uplinkmgr multi-WAN uplink monitor daemon")
+    p.add_argument(
+        "--config",
+        default=cfg_mod.DEFAULT_CONFIG_PATH,
+        metavar="PATH",
+        help=f"config file path (default: {cfg_mod.DEFAULT_CONFIG_PATH})",
+    )
+    p.add_argument(
+        "--state-dir",
+        default=DEFAULT_STATE_DIR,
+        metavar="DIR",
+        help=f"runtime state directory (default: {DEFAULT_STATE_DIR})",
+    )
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="logging level (default: INFO)",
+    )
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s uplinkmgr %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    daemon = Daemon(config_path=args.config, state_dir=args.state_dir)
+    daemon.run()
+
+
+if __name__ == "__main__":
+    main()

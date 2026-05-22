@@ -1,0 +1,34 @@
+Source: uplinkmgr
+Section: net
+Priority: optional
+Maintainer: Kevin Rose <krose@krose.org>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ python3-all,
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: uplinkmgr
+Architecture: all
+Depends:
+ ${python3:Depends},
+ ${misc:Depends},
+ python3-yaml,
+ dhcpcd5,
+ radvd,
+ iproute2,
+ iputils-ping,
+ ifupdown,
+Description: Multi-WAN uplink manager with IPv4 failover and IPv6 multi-homing
+ uplinkmgr configures a Linux router to handle multiple internet (WAN)
+ uplinks with automatic failover for IPv4 and multi-homing for IPv6.
+ .
+ It provides metric-ordered IPv4 default routes (highest-priority live
+ uplink wins), SLAAC-based IPv6 multi-homing via macvlan interfaces and
+ per-uplink prefix delegation, and graceful degradation through radvd
+ AdvDefaultPreference signalling when an uplink fails.
+ .
+ Components: uplinkmgr-setup (generates static config), a dhcpcd exit
+ hook (maintains per-uplink routing tables), and the uplinkmgr daemon
+ (monitors uplinks and manages radvd lifecycle).

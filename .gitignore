@@ -1,0 +1,25 @@
+# Python build artifacts
+src/*.egg-info/
+src/uplinkmgr/__pycache__/
+*.pyc
+__pycache__/
+
+# Debian build artifacts
+debian/uplinkmgr/
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.debhelper
+debian/*.debhelper.log
+debian/*.substvars
+.pybuild/
+
+# Built packages (one directory up)
+../*.deb
+../*.buildinfo
+../*.changes
+../*.dsc
+../*.tar.*
+
+# Claude Code local settings
+.claude/settings.local.json

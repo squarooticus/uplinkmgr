@@ -1,0 +1,45 @@
+# uplinkmgr configuration example
+# Copy to /etc/uplinkmgr/uplinkmgr.yaml and edit before use.
+# Regenerate generated files with: uplinkmgr-setup
+
+uplinkmgr:
+  # First per-uplink routing table number (1-252; default: 160)
+  routing_table_start: 160
+
+  # First ip -6 rule priority (default: 29000)
+  rule_priority_start: 29000
+
+  # If true, add a prohibit default to per-uplink tables to reject
+  # packets with a source address that doesn't belong to that uplink.
+  reject_incompatible_src: false
+
+  monitor:
+    interval: 10             # seconds between probe cycles
+    failure_threshold: 3     # consecutive failures before deprovisioning
+    recovery_threshold: 3    # consecutive successes before reprovisioning
+    v4_hosts:
+      - 8.8.8.8
+      - 1.1.1.1
+    v6_hosts:
+      - 2001:4860:4860::8888
+      - 2606:4700:4700::1111
+
+  # Internal LAN interfaces, in config-file order.
+  # Each becomes a macvlan parent for IPv6 uplinks.
+  networks:
+    - name: home
+      interface: vlan10
+    # - name: iot
+    #   interface: vlan20
+
+  # WAN uplinks in priority order (index 0 = highest priority).
+  uplinks:
+    - name: primary
+      interface: eth0
+      ipv6_pd: true          # request IPv6 prefix delegation
+      ipv6_pd_hint: 56       # requested PD prefix length hint (ISP may ignore)
+      metric: 100            # IPv4 route metric (lower = preferred)
+    # - name: secondary
+    #   interface: eth1
+    #   ipv6_pd: false       # IPv4-only uplink
+    #   metric: 200

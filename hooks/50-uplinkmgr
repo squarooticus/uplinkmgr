@@ -1,0 +1,194 @@
+#!/bin/sh
+# dhcpcd exit hook for uplinkmgr
+# Installed at /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr
+# Sourced by dhcpcd on every lease event.
+
+UPLINKMGR_ENV_DIR=/etc/uplinkmgr/uplinks
+UPLINKMGR_STATE_DIR=/run/uplinkmgr
+UPLINKMGR_PID_FILE="${UPLINKMGR_STATE_DIR}/uplinkmgr.pid"
+
+# --- Identify uplink ---
+
+env_file="${UPLINKMGR_ENV_DIR}/${interface}.env"
+[ -f "$env_file" ] || return 0
+. "$env_file"
+
+# --- Helper: signal the daemon ---
+
+_signal_daemon() {
+    if [ -f "$UPLINKMGR_PID_FILE" ]; then
+        kill -USR1 "$(cat "$UPLINKMGR_PID_FILE")" 2>/dev/null || true
+    fi
+}
+
+# --- Determine interface role ---
+
+_is_wan=false
+_is_macvlan=false
+
+if [ "$interface" = "$UPLINKMGR_WAN_IFACE" ]; then
+    _is_wan=true
+else
+    for _mv in $UPLINKMGR_MACVLAN_INTERFACES; do
+        if [ "$interface" = "$_mv" ]; then
+            _is_macvlan=true
+            break
+        fi
+    done
+fi
+
+# --- Dispatch ---
+
+case "$reason" in
+
+    # IPv4: WAN interface only
+    BOUND|RENEW|REBIND|REBOOT)
+        [ "$_is_wan" = true ] || return 0
+
+        GW4="${routers%% *}"  # take first gateway
+        [ -n "$GW4" ] || return 0
+
+        mkdir -p "$UPLINKMGR_STATE_DIR"
+        ip route replace default via "$GW4" dev "$interface" \
+            table "$UPLINKMGR_TABLE_NUM"
+        printf '%s\n' "$GW4" \
+            > "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv4.state"
+        ;;
+
+    EXPIRE|RELEASE|STOP)
+        [ "$_is_wan" = true ] || return 0
+
+        ip route del default table "$UPLINKMGR_TABLE_NUM" 2>/dev/null || true
+        rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv4.state"
+        ;;
+
+    # IPv6 router advertisement: WAN interface only
+    ROUTERADVERT)
+        [ "$_is_wan" = true ] || return 0
+        [ "$UPLINKMGR_IPV6_PD" = true ] || return 0
+
+        GW6="$nd1_from"
+        ND1_LIFETIME="${nd1_lifetime:-0}"
+
+        [ -n "$GW6" ] || return 0
+
+        if [ "$ND1_LIFETIME" -gt 0 ] 2>/dev/null; then
+            ip -6 route replace default via "$GW6" dev "$interface" \
+                table "$UPLINKMGR_TABLE_NUM" expires "$ND1_LIFETIME"
+        else
+            ip -6 route replace default via "$GW6" dev "$interface" \
+                table "$UPLINKMGR_TABLE_NUM"
+        fi
+
+        mkdir -p "$UPLINKMGR_STATE_DIR"
+        printf 'gateway=%s\nnd1_lifetime=%s\ntimestamp=%s\n' \
+            "$GW6" "$ND1_LIFETIME" "$(date +%s)" \
+            > "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6gw.state"
+
+        _signal_daemon
+        ;;
+
+    # IPv6 lease: WAN interface — PD state
+    BOUND6|RENEW6)
+        if [ "$_is_wan" = true ] && [ "$UPLINKMGR_IPV6_PD" = true ]; then
+            # PD variables are on the WAN interface event
+            DELEGATED_PREFIX="${dhcp6_ia_pd1_prefix1:-}"
+            DELEGATED_LENGTH="${dhcp6_ia_pd1_prefix1_length:-}"
+            VLTIME="${dhcp6_ia_pd1_prefix1_vltime:-}"
+            PLTIME="${dhcp6_ia_pd1_prefix1_pltime:-}"
+
+            if [ -n "$DELEGATED_PREFIX" ] && [ -n "$DELEGATED_LENGTH" ]; then
+                mkdir -p "$UPLINKMGR_STATE_DIR"
+                printf 'delegated_prefix=%s\ndelegated_length=%s\nvltime=%s\npltime=%s\ntimestamp=%s\n' \
+                    "$DELEGATED_PREFIX" "$DELEGATED_LENGTH" \
+                    "$VLTIME" "$PLTIME" "$(date +%s)" \
+                    > "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
+                _signal_daemon
+            fi
+
+        elif [ "$_is_macvlan" = true ]; then
+            # Macvlan event: set up routes and ip rules
+            [ -n "$new_ip6_address" ] || return 0
+
+            # Derive the /64 prefix from the assigned address
+            PREFIX=$(python3 -c "
+import ipaddress, sys
+try:
+    plen = int('${new_ip6_prefixlen}') if '${new_ip6_prefixlen}' else 64
+    addr = ipaddress.ip_interface('${new_ip6_address}/' + str(plen))
+    net64 = addr.network.supernet(new_prefix=64)
+    print(net64.network_address)
+except Exception as e:
+    sys.exit(1)
+" 2>/dev/null) || return 0
+
+            [ -n "$PREFIX" ] || return 0
+
+            # Add prefix route to per-uplink table
+            ip -6 route replace "${PREFIX}/64" dev "$interface" \
+                table "$UPLINKMGR_TABLE_NUM"
+
+            # Determine rule priority for this macvlan
+            # Enumerate macvlan interfaces in order to find our index
+            _mv_idx=0
+            _rule_priority="$UPLINKMGR_RULE_PRIORITY_START"
+            for _mv in $UPLINKMGR_MACVLAN_INTERFACES; do
+                if [ "$_mv" = "$interface" ]; then
+                    _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
+                    break
+                fi
+                _mv_idx=$(( _mv_idx + 1 ))
+            done
+
+            # Install policy routing rule (idempotent)
+            ip -6 rule del iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
+                priority "$_rule_priority" 2>/dev/null || true
+            ip -6 rule add iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
+                priority "$_rule_priority"
+
+            # Optional: prohibit incompatible source addresses
+            if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
+                ip -6 route replace prohibit default \
+                    table "$UPLINKMGR_TABLE_NUM" metric 65535
+            fi
+        fi
+        ;;
+
+    # IPv6 expiry: macvlan interfaces
+    EXPIRE6|STOP6)
+        [ "$_is_macvlan" = true ] || return 0
+        [ -n "$new_ip6_address" ] || return 0
+
+        PREFIX=$(python3 -c "
+import ipaddress, sys
+try:
+    plen = int('${new_ip6_prefixlen}') if '${new_ip6_prefixlen}' else 64
+    addr = ipaddress.ip_interface('${new_ip6_address}/' + str(plen))
+    net64 = addr.network.supernet(new_prefix=64)
+    print(net64.network_address)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null) || return 0
+
+        [ -n "$PREFIX" ] || return 0
+
+        ip -6 route del "${PREFIX}/64" dev "$interface" \
+            table "$UPLINKMGR_TABLE_NUM" 2>/dev/null || true
+
+        _mv_idx=0
+        _rule_priority="$UPLINKMGR_RULE_PRIORITY_START"
+        for _mv in $UPLINKMGR_MACVLAN_INTERFACES; do
+            if [ "$_mv" = "$interface" ]; then
+                _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
+                break
+            fi
+            _mv_idx=$(( _mv_idx + 1 ))
+        done
+
+        ip -6 rule del iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
+            priority "$_rule_priority" 2>/dev/null || true
+        ;;
+
+esac
+
+return 0
