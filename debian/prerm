@@ -4,14 +4,14 @@ set -e
 case "$1" in
     remove|upgrade|deconfigure)
         if [ -d /run/systemd/system ]; then
-            # Stop and disable per-uplink services before the package files
-            # are removed (the generated .service files live in /etc/systemd/system/).
-            for svc in /etc/systemd/system/dhcpcd-uplinkmgr-*.service \
-                       /etc/systemd/system/radvd-uplinkmgr-*.service; do
+            # Stop radvd units before the generated .service files are removed.
+            for svc in /etc/systemd/system/radvd-uplinkmgr-*.service; do
                 [ -f "$svc" ] || continue
                 name=$(basename "$svc")
                 systemctl disable --now "$name" 2>/dev/null || true
             done
+            # Stop dhcpcd; postrm will restore /etc/dhcpcd.conf from backup.
+            systemctl stop dhcpcd.service 2>/dev/null || true
         fi
         ;;
 esac

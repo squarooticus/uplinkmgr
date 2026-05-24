@@ -66,13 +66,6 @@ def rule_priority(rule_priority_start: int, uplink_idx: int, net_idx: int,
     return rule_priority_start + uplink_idx * num_networks + net_idx
 
 
-def dhcpcd_conf_path(uplink_name: str) -> str:
-    return f"/etc/dhcpcd-uplinkmgr-{uplink_name}.conf"
-
-
-def dhcpcd_unit_name(uplink_name: str) -> str:
-    return f"dhcpcd-uplinkmgr-{uplink_name}.service"
-
 
 def radvd_conf_path(uplink_name: str) -> str:
     return f"/etc/radvd/radvd-uplinkmgr-{uplink_name}.conf"

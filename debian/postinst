@@ -16,7 +16,7 @@ case "$1" in
             echo "uplinkmgr: edit it and run 'uplinkmgr-setup' before starting services"
         fi
 
-        # Generate/regenerate config files
+        # Generate/regenerate config files (writes /etc/dhcpcd.conf with backup)
         if [ -f /etc/uplinkmgr/uplinkmgr.yaml ]; then
             uplinkmgr-setup || true
         fi
@@ -27,39 +27,22 @@ esac
 
 case "$1" in
     configure)
-        # Disable the system-default dhcpcd instance to prevent conflicts.
-        # (Per-uplink dhcpcd instances managed by uplinkmgr conflict with it.)
         if [ -d /run/systemd/system ]; then
-            if systemctl is-enabled --quiet dhcpcd.service 2>/dev/null; then
-                echo "uplinkmgr: disabling system-default dhcpcd.service (conflicts with uplinkmgr)"
-                systemctl disable --now dhcpcd.service || true
-            fi
-
-            FRESH_INSTALL=false
-            [ -z "$2" ] && FRESH_INSTALL=true
-
-            if $FRESH_INSTALL; then
-                # Enable and start per-uplink services (fresh install only;
-                # on upgrade dh_installsystemd restarts already-running services)
-                systemctl daemon-reload || true
-                for svc in /etc/systemd/system/dhcpcd-uplinkmgr-*.service \
-                           /etc/systemd/system/radvd-uplinkmgr-*.service; do
-                    [ -f "$svc" ] || continue
-                    name=$(basename "$svc")
+            systemctl daemon-reload || true
+            # Restart dhcpcd so it picks up the new /etc/dhcpcd.conf.
+            systemctl restart dhcpcd.service || true
+            # Restart radvd units if already running (fresh-install start is
+            # handled by dh_installsystemd via the WantedBy= in each unit).
+            for svc in /etc/systemd/system/radvd-uplinkmgr-*.service; do
+                [ -f "$svc" ] || continue
+                name=$(basename "$svc")
+                if [ -z "$2" ]; then
                     systemctl enable "$name" || true
                     systemctl start "$name" || true
-                done
-            else
-                # Upgrade: restart per-uplink services only if already running
-                for svc in /etc/systemd/system/dhcpcd-uplinkmgr-*.service \
-                           /etc/systemd/system/radvd-uplinkmgr-*.service; do
-                    [ -f "$svc" ] || continue
-                    name=$(basename "$svc")
-                    if systemctl is-active --quiet "$name" 2>/dev/null; then
-                        systemctl restart "$name" || true
-                    fi
-                done
-            fi
+                elif systemctl is-active --quiet "$name" 2>/dev/null; then
+                    systemctl restart "$name" || true
+                fi
+            done
         fi
         ;;
 esac

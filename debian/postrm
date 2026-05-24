@@ -3,29 +3,34 @@ set -e
 
 #DEBHELPER#
 
+_restore_dhcpcd_conf() {
+    if [ -f /etc/dhcpcd.conf.pre-uplinkmgr ]; then
+        mv /etc/dhcpcd.conf.pre-uplinkmgr /etc/dhcpcd.conf
+        echo "uplinkmgr: restored /etc/dhcpcd.conf from pre-uplinkmgr backup"
+    else
+        rm -f /etc/dhcpcd.conf
+    fi
+}
+
 case "$1" in
     purge)
+        _restore_dhcpcd_conf
         # Remove all generated config files
         rm -f /etc/network/interfaces.d/uplinkmgr.conf
-        rm -f /etc/dhcpcd-uplinkmgr-*.conf
-        rm -f /etc/systemd/system/dhcpcd-uplinkmgr-*.service
         rm -f /etc/systemd/system/radvd-uplinkmgr-*.service
         rm -f /etc/radvd/radvd-uplinkmgr-*.conf
         rm -f /etc/iproute2/rt_tables.d/uplinkmgr.conf
         # Remove config directory (including user's uplinkmgr.yaml on purge)
         rm -rf /etc/uplinkmgr
-        # Note: system-default dhcpcd.service is NOT re-enabled here.
-        # The administrator must re-enable it manually if desired.
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
         fi
         ;;
 
     remove)
+        _restore_dhcpcd_conf
         # Remove generated files but leave /etc/uplinkmgr/ intact
         rm -f /etc/network/interfaces.d/uplinkmgr.conf
-        rm -f /etc/dhcpcd-uplinkmgr-*.conf
-        rm -f /etc/systemd/system/dhcpcd-uplinkmgr-*.service
         rm -f /etc/systemd/system/radvd-uplinkmgr-*.service
         rm -f /etc/radvd/radvd-uplinkmgr-*.conf
         rm -f /etc/iproute2/rt_tables.d/uplinkmgr.conf
