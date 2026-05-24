@@ -221,7 +221,7 @@ uplinkmgr:
 ### 4.3 Field Constraints
 
 - `routing_table_start`: Must be in the range 1–252 (default: 160). Avoid the well-known reserved IDs: 0=unspec, 253=default, 254=main, 255=local. Values above 255 are also valid kernel table numbers, but the default keeps table IDs in the single-byte range for readability in `ip route show table all` output. The range `[routing_table_start, routing_table_start + len(uplinks) - 1]` must not overlap with any table numbers already in `/etc/iproute2/rt_tables` or `/etc/iproute2/rt_tables.d/`.
-- `rule_priority_start`: Must leave room for `len(uplinks) * len(networks) * 2` rules (one per macvlan interface direction, plus optional prohibit rules). The range is documented as `[rule_priority_start, rule_priority_start + 99]`.
+- `rule_priority_start`: Must leave room for `len(uplinks) * len(networks) + len(uplinks)` rules (`len(uplinks) * len(networks)` macvlan `iif` rules plus `len(uplinks)` WAN `from` rules). The range is documented as `[rule_priority_start, rule_priority_start + 99]`.
 - `uplink.name`: Must consist only of alphanumeric characters and hyphens; must be unique across all uplinks.
 - `network.interface` and `uplink.interface`: Must be valid Linux interface names (max 15 chars). They are **not** validated against live interface existence by `uplinkmgr-setup` (the system may be configured before interfaces exist).
 - `uplink.metric`: If specified, must be a positive integer. If omitted, defaults to `100 * (uplink_index + 1)`.
@@ -457,6 +457,15 @@ Actions:
    fi
    ```
 
+4. Install a source-address rule for locally-generated traffic (idempotent). Without this, packets with `$new_ip6_address` as source would fall through to the main routing table and egress via the wrong uplink:
+   ```sh
+   ip -6 rule del from "${new_ip6_address}/128" lookup "$UPLINKMGR_TABLE_NUM" \
+       priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
+   ip -6 rule add from "${new_ip6_address}/128" lookup "$UPLINKMGR_TABLE_NUM" \
+       priority "$UPLINKMGR_WAN_RULE_PRIORITY"
+   ```
+   `UPLINKMGR_WAN_RULE_PRIORITY` is `rule_priority_start + len(uplinks) * len(networks) + uplink_index` — one slot per uplink, in the band above all macvlan `iif` rules.
+
 #### 5.2.8 IPv6 BOUND6 / RENEW6 (macvlan interfaces — route and rule setup)
 
 Triggered when: `$reason` is `BOUND6` or `RENEW6` and `$interface` is one of the macvlan interfaces for this uplink.
@@ -491,11 +500,16 @@ Actions:
    ip -6 route replace prohibit default table "$UPLINKMGR_TABLE_NUM" metric 65535
    ```
 
-#### 5.2.9 IPv6 EXPIRE6 / STOP6 (macvlan interfaces)
+#### 5.2.9 IPv6 EXPIRE6 / STOP6 (WAN and macvlan interfaces)
 
-Triggered when: `$reason` is `EXPIRE6` or `STOP6` and `$interface` is one of the macvlan interfaces.
+Triggered when: `$reason` is `EXPIRE6` or `STOP6`.
 
-Actions:
+**WAN interface:** Remove the source-address rule installed in §5.2.7. The priority uniquely identifies it, so no address lookup is needed:
+```sh
+ip -6 rule del priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
+```
+
+**Macvlan interfaces:**
 
 1. Remove the prefix route from the per-uplink table:
    ```sh
@@ -1055,15 +1069,23 @@ This must be set before the interface is brought up, which is why it appears in 
 
 ### 7.5 ip -6 Rule Priorities
 
-ip -6 rules are assigned priorities from `rule_priority_start` upward, one per macvlan interface, in the order: enumerate uplinks × enumerate internal interfaces.
+ip -6 rules are assigned priorities from `rule_priority_start` upward in two bands:
 
-Example with 2 uplinks and 2 internal interfaces:
+**Band 1 — macvlan `iif` rules** (forwarded traffic from internal clients):
+`rule_priority_start + uplink_idx * len(networks) + net_idx`
+
+**Band 2 — WAN `from` rules** (locally-generated traffic on the router itself):
+`rule_priority_start + len(uplinks) * len(networks) + uplink_idx`
+
+Example with 2 uplinks (`comcast`=0, `starlink`=1) and 2 internal interfaces:
 - Priority 29000: `iif vlan10-u0 lookup uplinkmgr_comcast`
 - Priority 29001: `iif vlan20-u0 lookup uplinkmgr_comcast`
 - Priority 29002: `iif vlan10-u1 lookup uplinkmgr_starlink`
 - Priority 29003: `iif vlan20-u1 lookup uplinkmgr_starlink`
+- Priority 29004: `from <comcast-ia-na>/128 lookup uplinkmgr_comcast`
+- Priority 29005: `from <starlink-ia-na>/128 lookup uplinkmgr_starlink`
 
-The configured range `[rule_priority_start, rule_priority_start + 99]` limits the system to 100 ip -6 rules for uplinkmgr, supporting up to 50 (uplink, network) pairs, which is ample.
+The configured range `[rule_priority_start, rule_priority_start + 99]` limits the system to 100 ip -6 rules for uplinkmgr, supporting up to roughly 45 (uplink, network) pairs (e.g., 9 uplinks × 5 networks + 9 WAN rules = 54 rules), which is ample.
 
 ### 7.6 SLA IDs for IPv6 PD
 

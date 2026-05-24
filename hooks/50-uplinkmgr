@@ -88,7 +88,7 @@ case "$reason" in
         _signal_daemon
         ;;
 
-    # IPv6 lease: WAN interface — PD state
+    # IPv6 lease: WAN interface — PD state + source routing rule
     BOUND6|RENEW6)
         if [ "$_is_wan" = true ] && [ "$UPLINKMGR_IPV6_PD" = true ]; then
             # PD variables are on the WAN interface event
@@ -104,6 +104,19 @@ case "$reason" in
                     "$VLTIME" "$PLTIME" "$(date +%s)" \
                     > "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
                 _signal_daemon
+            fi
+
+            # Install a source-address rule for locally-generated traffic so
+            # that packets with the IA_NA address as source use the correct
+            # uplink's routing table rather than falling through to the main
+            # table and going out the wrong interface.
+            if [ -n "$new_ip6_address" ]; then
+                ip -6 rule del from "${new_ip6_address}/128" \
+                    lookup "$UPLINKMGR_TABLE_NUM" \
+                    priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
+                ip -6 rule add from "${new_ip6_address}/128" \
+                    lookup "$UPLINKMGR_TABLE_NUM" \
+                    priority "$UPLINKMGR_WAN_RULE_PRIORITY"
             fi
 
         elif [ "$_is_macvlan" = true ]; then
@@ -154,8 +167,12 @@ except Exception as e:
         fi
         ;;
 
-    # IPv6 expiry: macvlan interfaces
+    # IPv6 expiry: WAN interface (remove source routing rule) + macvlan interfaces
     EXPIRE6|STOP6)
+        if [ "$_is_wan" = true ] && [ "$UPLINKMGR_IPV6_PD" = true ]; then
+            ip -6 rule del priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
+            return 0
+        fi
         [ "$_is_macvlan" = true ] || return 0
         [ -n "$new_ip6_address" ] || return 0
 
