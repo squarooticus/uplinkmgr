@@ -278,9 +278,16 @@ def env_file(cfg: Config, uplink: UplinkConfig) -> str:
     # Rule priorities are globally sequential: uplink N starts at
     # rule_priority_start + N * len(networks), one slot per macvlan.
     uplink_rule_prio_start = cfg.rule_priority_start + uplink.index * len(cfg.networks)
-    # WAN from-rules occupy the band above all macvlan iif rules, one per uplink.
+    # WAN from-rules: one slot per uplink, above all macvlan iif rules.
     wan_rule_priority = (
         cfg.rule_priority_start + len(cfg.uplinks) * len(cfg.networks) + uplink.index
+    )
+    # Prohibit catch-all rules (reject_incompatible_src): one slot per macvlan,
+    # in the band above the WAN from-rules.
+    reject_rule_prio_start = (
+        cfg.rule_priority_start
+        + len(cfg.uplinks) * (len(cfg.networks) + 1)
+        + uplink.index * len(cfg.networks)
     )
 
     return (
@@ -293,6 +300,7 @@ def env_file(cfg: Config, uplink: UplinkConfig) -> str:
         f"UPLINKMGR_WAN_IFACE={uplink.interface}\n"
         f"UPLINKMGR_RULE_PRIORITY_START={uplink_rule_prio_start}\n"
         f"UPLINKMGR_WAN_RULE_PRIORITY={wan_rule_priority}\n"
+        f"UPLINKMGR_REJECT_RULE_PRIORITY_START={reject_rule_prio_start}\n"
         f"UPLINKMGR_MACVLAN_INTERFACES=\"{macvlan_ifaces}\"\n"
         f"UPLINKMGR_IPV6_PD={'true' if uplink.ipv6_pd else 'false'}\n"
         f"UPLINKMGR_REJECT_INCOMPATIBLE_SRC="

@@ -153,16 +153,23 @@ except Exception as e:
                 _mv_idx=$(( _mv_idx + 1 ))
             done
 
-            # Install policy routing rule (idempotent)
-            ip -6 rule del iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
-                priority "$_rule_priority" 2>/dev/null || true
-            ip -6 rule add iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
-                priority "$_rule_priority"
-
-            # Optional: prohibit incompatible source addresses
+            # Install policy routing rule (idempotent).
+            # When reject_incompatible_src is on, restrict the lookup rule to
+            # the correct source prefix so that traffic with a source address
+            # from a different uplink does not match.  A catch-all prohibit
+            # rule at a lower priority then rejects the mismatched traffic.
+            # When the option is off, a plain iif rule accepts all sources.
+            ip -6 rule del priority "$_rule_priority" 2>/dev/null || true
             if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
-                ip -6 route replace prohibit default \
-                    table "$UPLINKMGR_TABLE_NUM" metric 65535
+                ip -6 rule add from "${PREFIX}/64" iif "$interface" \
+                    lookup "$UPLINKMGR_TABLE_NUM" priority "$_rule_priority"
+                _prohibit_priority=$(( UPLINKMGR_REJECT_RULE_PRIORITY_START + _mv_idx ))
+                ip -6 rule del priority "$_prohibit_priority" 2>/dev/null || true
+                ip -6 rule add iif "$interface" prohibit \
+                    priority "$_prohibit_priority"
+            else
+                ip -6 rule add iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
+                    priority "$_rule_priority"
             fi
         fi
         ;;
@@ -202,8 +209,11 @@ except Exception:
             _mv_idx=$(( _mv_idx + 1 ))
         done
 
-        ip -6 rule del iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
-            priority "$_rule_priority" 2>/dev/null || true
+        ip -6 rule del priority "$_rule_priority" 2>/dev/null || true
+        if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
+            _prohibit_priority=$(( UPLINKMGR_REJECT_RULE_PRIORITY_START + _mv_idx ))
+            ip -6 rule del priority "$_prohibit_priority" 2>/dev/null || true
+        fi
         ;;
 
 esac
