@@ -120,29 +120,7 @@ case "$reason" in
             fi
 
         elif [ "$_is_macvlan" = true ]; then
-            # Macvlan event: set up routes and ip rules
-            [ -n "$new_ip6_address" ] || return 0
-
-            # Derive the /64 prefix from the assigned address
-            PREFIX=$(python3 -c "
-import ipaddress, sys
-try:
-    plen = int('${new_ip6_prefixlen}') if '${new_ip6_prefixlen}' else 64
-    addr = ipaddress.ip_interface('${new_ip6_address}/' + str(plen))
-    net64 = addr.network.supernet(new_prefix=64)
-    print(net64.network_address)
-except Exception as e:
-    sys.exit(1)
-" 2>/dev/null) || return 0
-
-            [ -n "$PREFIX" ] || return 0
-
-            # Add prefix route to per-uplink table
-            ip -6 route replace "${PREFIX}/64" dev "$interface" \
-                table "$UPLINKMGR_TABLE_NUM"
-
             # Determine rule priority for this macvlan
-            # Enumerate macvlan interfaces in order to find our index
             _mv_idx=0
             _rule_priority="$UPLINKMGR_RULE_PRIORITY_START"
             for _mv in $UPLINKMGR_MACVLAN_INTERFACES; do
@@ -161,6 +139,18 @@ except Exception as e:
             # When the option is off, a plain iif rule accepts all sources.
             ip -6 rule del priority "$_rule_priority" 2>/dev/null || true
             if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
+                [ -n "$new_ip6_address" ] || return 0
+                PREFIX=$(python3 -c "
+import ipaddress, sys
+try:
+    plen = int('${new_ip6_prefixlen}') if '${new_ip6_prefixlen}' else 64
+    addr = ipaddress.ip_interface('${new_ip6_address}/' + str(plen))
+    net64 = addr.network.supernet(new_prefix=64)
+    print(net64.network_address)
+except Exception as e:
+    sys.exit(1)
+" 2>/dev/null) || return 0
+                [ -n "$PREFIX" ] || return 0
                 ip -6 rule add from "${PREFIX}/64" iif "$interface" \
                     lookup "$UPLINKMGR_TABLE_NUM" priority "$_rule_priority"
                 _prohibit_priority=$(( UPLINKMGR_REJECT_RULE_PRIORITY_START + _mv_idx ))
@@ -181,23 +171,6 @@ except Exception as e:
             return 0
         fi
         [ "$_is_macvlan" = true ] || return 0
-        [ -n "$new_ip6_address" ] || return 0
-
-        PREFIX=$(python3 -c "
-import ipaddress, sys
-try:
-    plen = int('${new_ip6_prefixlen}') if '${new_ip6_prefixlen}' else 64
-    addr = ipaddress.ip_interface('${new_ip6_address}/' + str(plen))
-    net64 = addr.network.supernet(new_prefix=64)
-    print(net64.network_address)
-except Exception:
-    sys.exit(1)
-" 2>/dev/null) || return 0
-
-        [ -n "$PREFIX" ] || return 0
-
-        ip -6 route del "${PREFIX}/64" dev "$interface" \
-            table "$UPLINKMGR_TABLE_NUM" 2>/dev/null || true
 
         _mv_idx=0
         _rule_priority="$UPLINKMGR_RULE_PRIORITY_START"

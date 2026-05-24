@@ -470,25 +470,11 @@ Actions:
 
 Triggered when: `$reason` is `BOUND6` or `RENEW6` and `$interface` is one of the macvlan interfaces for this uplink.
 
-This event fires after dhcpcd has assigned a delegated sub-prefix to a macvlan interface. The PD lifetime variables are **not** reliably present here; they are handled in §5.2.7. This handler's sole responsibility is routing state.
+This event fires after dhcpcd has assigned a delegated sub-prefix to a macvlan interface. The PD lifetime variables are **not** reliably present here; they are handled in §5.2.7. This handler's sole responsibility is ip rule setup.
 
 Actions:
 
-1. Derive the /64 prefix assigned to this interface from `$new_ip6_address` (zero the lower 64 bits):
-   ```sh
-   PREFIX=$(python3 -c "
-   import ipaddress, sys
-   addr = ipaddress.ip_interface('${new_ip6_address}/${new_ip6_prefixlen}')
-   print(addr.network.supernet(new_prefix=64).network_address)
-   ")
-   ```
-
-2. Add the prefix route to the per-uplink table:
-   ```sh
-   ip -6 route replace "${PREFIX}/64" dev "$interface" table "$UPLINKMGR_TABLE_NUM"
-   ```
-
-3. Install the policy routing rule linking this macvlan to the per-uplink table (idempotent). The form depends on `reject_incompatible_src`:
+1. Install the policy routing rule linking this macvlan to the per-uplink table (idempotent). The form depends on `reject_incompatible_src`:
 
    **`reject_incompatible_src` off** — accept all incoming source addresses:
    ```sh
@@ -518,15 +504,11 @@ ip -6 rule del priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
 
 **Macvlan interfaces:**
 
-1. Remove the prefix route from the per-uplink table:
-   ```sh
-   ip -6 route del "${PREFIX}/64" dev "$interface" table "$UPLINKMGR_TABLE_NUM" 2>/dev/null || true
-   ```
-2. Remove the policy routing rule (delete by priority; works whether the rule has a `from` constraint or not):
+1. Remove the policy routing rule (delete by priority; works whether the rule has a `from` constraint or not):
    ```sh
    ip -6 rule del priority "$RULE_PRIORITY" 2>/dev/null || true
    ```
-3. If `reject_incompatible_src` is enabled, also remove the prohibit catch-all rule:
+2. If `reject_incompatible_src` is enabled, also remove the prohibit catch-all rule:
    ```sh
    ip -6 rule del priority "$PROHIBIT_PRIORITY" 2>/dev/null || true
    ```
