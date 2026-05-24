@@ -133,26 +133,19 @@ case "$reason" in
 
             # Install policy routing rule (idempotent).
             # When reject_incompatible_src is on, restrict the lookup rule to
-            # the correct source prefix so that traffic with a source address
-            # from a different uplink does not match.  A catch-all prohibit
-            # rule at a lower priority then rejects the mismatched traffic.
-            # When the option is off, a plain iif rule accepts all sources.
+            # the entire delegated prefix space for this uplink so that traffic
+            # with a source address from a different uplink does not match.
+            # A catch-all prohibit rule at a lower priority then rejects the
+            # mismatched traffic.  When the option is off, a plain iif rule
+            # accepts all sources.
             ip -6 rule del priority "$_rule_priority" 2>/dev/null || true
             if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
-                [ -n "$new_ip6_address" ] || return 0
-                PREFIX=$(python3 -c "
-import ipaddress, sys
-try:
-    plen = int('${new_ip6_prefixlen}') if '${new_ip6_prefixlen}' else 64
-    addr = ipaddress.ip_interface('${new_ip6_address}/' + str(plen))
-    net64 = addr.network.supernet(new_prefix=64)
-    print(net64.network_address)
-except Exception as e:
-    sys.exit(1)
-" 2>/dev/null) || return 0
-                [ -n "$PREFIX" ] || return 0
-                ip -6 rule add from "${PREFIX}/64" iif "$interface" \
-                    lookup "$UPLINKMGR_TABLE_NUM" priority "$_rule_priority"
+                DELEGATED_PREFIX="${new_dhcp6_ia_pd1_prefix1:-}"
+                DELEGATED_LENGTH="${new_dhcp6_ia_pd1_prefix1_length:-}"
+                [ -n "$DELEGATED_PREFIX" ] && [ -n "$DELEGATED_LENGTH" ] || return 0
+                ip -6 rule add from "${DELEGATED_PREFIX}/${DELEGATED_LENGTH}" \
+                    iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
+                    priority "$_rule_priority"
                 _prohibit_priority=$(( UPLINKMGR_REJECT_RULE_PRIORITY_START + _mv_idx ))
                 ip -6 rule del priority "$_prohibit_priority" 2>/dev/null || true
                 ip -6 rule add iif "$interface" prohibit \

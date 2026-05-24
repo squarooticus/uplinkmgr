@@ -482,10 +482,11 @@ Actions:
    ip -6 rule add iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" priority "$RULE_PRIORITY"
    ```
 
-   **`reject_incompatible_src` on** — restrict the lookup rule to the macvlan's own prefix, then add a catch-all prohibit rule at a lower priority to drop traffic that arrives on this macvlan with an incompatible source address:
+   **`reject_incompatible_src` on** — restrict the lookup rule to the entire delegated prefix space for this uplink (e.g. a /60), then add a catch-all prohibit rule at a lower priority to drop traffic that arrives on this macvlan with a source address from a different uplink. The delegated prefix and length are available directly as `$new_dhcp6_ia_pd1_prefix1` and `$new_dhcp6_ia_pd1_prefix1_length`:
    ```sh
    ip -6 rule del priority "$RULE_PRIORITY" 2>/dev/null || true
-   ip -6 rule add from "${PREFIX}/64" iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" priority "$RULE_PRIORITY"
+   ip -6 rule add from "${new_dhcp6_ia_pd1_prefix1}/${new_dhcp6_ia_pd1_prefix1_length}" \
+       iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" priority "$RULE_PRIORITY"
    ip -6 rule del priority "$PROHIBIT_PRIORITY" 2>/dev/null || true
    ip -6 rule add iif "$interface" prohibit priority "$PROHIBIT_PRIORITY"
    ```
@@ -1079,10 +1080,10 @@ Rule: `iif <macvlan> prohibit`
 These fire for traffic arriving on a macvlan whose source address did not match the Band 1 `from` constraint, i.e., it belongs to a different uplink's prefix.
 
 Example with 2 uplinks (`comcast`=0, `starlink`=1), 2 internal interfaces, `reject_incompatible_src` on:
-- Priority 29000: `from <comcast-pd-prefix>/64 iif vlan10-u0 lookup uplinkmgr_comcast`
-- Priority 29001: `from <comcast-pd-prefix>/64 iif vlan20-u0 lookup uplinkmgr_comcast`
-- Priority 29002: `from <starlink-pd-prefix>/64 iif vlan10-u1 lookup uplinkmgr_starlink`
-- Priority 29003: `from <starlink-pd-prefix>/64 iif vlan20-u1 lookup uplinkmgr_starlink`
+- Priority 29000: `from <comcast-delegated>/60 iif vlan10-u0 lookup uplinkmgr_comcast`
+- Priority 29001: `from <comcast-delegated>/60 iif vlan20-u0 lookup uplinkmgr_comcast`
+- Priority 29002: `from <starlink-delegated>/60 iif vlan10-u1 lookup uplinkmgr_starlink`
+- Priority 29003: `from <starlink-delegated>/60 iif vlan20-u1 lookup uplinkmgr_starlink`
 - Priority 29004: `from <comcast-ia-na>/128 lookup uplinkmgr_comcast`
 - Priority 29005: `from <starlink-ia-na>/128 lookup uplinkmgr_starlink`
 - Priority 29006: `iif vlan10-u0 prohibit`
