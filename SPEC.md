@@ -992,17 +992,17 @@ Pattern: `<internal-iface>-u<uplink-index>`
 
 Examples:
 - Internal interface `vlan10`, uplink index 0 → `vlan10-u0`
-- Internal interface `vlan20`, uplink index 1 → `vlan20-u1`
+- Internal interface `sfp0.20`, uplink index 1 → `sfp0.20-u1`
 
 **Truncation:** Linux interface names are limited to 15 characters (IFNAMSIZ - 1). If the derived name exceeds 15 characters, it is truncated as follows:
 
-- The suffix `-u<N>` is always preserved (maximum 4 characters for index 0–9, 5 for 10–99).
-- The internal interface name is truncated to fill the remaining characters: `<iface[:15-len(suffix)]><suffix>`.
+1. Determine whether the interface name ends with a numeric/dot suffix matching `[0-9.]*[0-9]$` (e.g. `1.20` in `sfp0.1.20`, or `20` in `vlan20`).
+2. **If a numeric suffix is present:** preserve it intact and preserve the `-u<N>` uplink suffix intact; truncate only the leading alphabetic portion to fit within 15 characters. If the numeric suffix + `-u<N>` together already exceed 15 characters, `uplinkmgr-setup` raises an error and refuses to proceed.
+3. **If no numeric suffix is present:** truncate the interface name from the right: `<iface[:15-len(suffix)]><suffix>`.
 
-Example: internal interface `ethernet-uplink` (15 chars), uplink index 3:
-- Suffix: `-u3` (3 chars)
-- Available for iface prefix: 12 chars
-- Result: `ethernet-upli-u3`
+Examples:
+- `abcdefghi1.20`, uplink 1: numeric suffix `1.20` (4), uplink suffix `-u1` (3) → 7 chars fixed; 8 available for alpha prefix `abcdefghi` → truncated to `abcdefgh` → `abcdefgh1.20-u1`
+- `ethernet-uplink` (no numeric suffix), uplink 3: suffix `-u3` (3); 12 chars for prefix → `ethernet-upli-u3`
 
 `uplinkmgr-setup` validates that no two macvlan names (after truncation) are identical.
 

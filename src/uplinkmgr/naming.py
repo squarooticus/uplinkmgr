@@ -2,19 +2,37 @@
 
 from __future__ import annotations
 
+import re
+
 from .config import Config, UplinkConfig, NetworkConfig
+
+_NUMERIC_SUFFIX_RE = re.compile(r'[0-9.]*[0-9]$')
 
 
 def macvlan_name(net_iface: str, uplink_idx: int) -> str:
     """Return the macvlan interface name for a (network, uplink) pair.
 
-    Truncates the network interface prefix if the full name would exceed
-    15 characters (Linux IFNAMSIZ - 1).
+    If net_iface ends with a numeric/dot suffix (e.g. "1.20"), that suffix
+    is preserved intact; only the leading alpha portion is truncated.
+    Raises ValueError if the numeric suffix alone already leaves no room.
     """
     suffix = f"-u{uplink_idx}"
-    max_prefix = 15 - len(suffix)
-    prefix = net_iface[:max_prefix]
-    return f"{prefix}{suffix}"
+    m = _NUMERIC_SUFFIX_RE.search(net_iface)
+    if m:
+        numeric_suffix = m.group()
+        alpha_prefix = net_iface[:m.start()]
+        available = 15 - len(numeric_suffix) - len(suffix)
+        if available < 0:
+            raise ValueError(
+                f"cannot generate macvlan name for interface '{net_iface}' "
+                f"uplink {uplink_idx}: numeric suffix '{numeric_suffix}' + "
+                f"'{suffix}' ({len(numeric_suffix) + len(suffix)} chars) "
+                f"already exceeds 15-character limit"
+            )
+        return f"{alpha_prefix[:available]}{numeric_suffix}{suffix}"
+    else:
+        max_prefix = 15 - len(suffix)
+        return f"{net_iface[:max_prefix]}{suffix}"
 
 
 def mac_address(uplink_idx: int, net_idx: int) -> str:
