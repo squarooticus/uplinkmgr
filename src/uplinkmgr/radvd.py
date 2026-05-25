@@ -28,12 +28,13 @@ def regenerate_all(
     cfg: Config,
     states: dict[str, UplinkState],
     state_dir: str,
-    restart: bool,
+    action: str,
 ) -> None:
-    """Regenerate radvd configs for all IPv6 uplinks and signal/restart radvd.
+    """Regenerate radvd configs for all IPv6 uplinks and optionally signal radvd.
 
-    restart=True  → use fresh lifetime values from state files, systemctl restart
-    restart=False → preference-change only (SIGHUP)
+    action="restart" → write configs with fresh lifetime values, systemctl restart
+    action="sighup"  → write configs, send SIGHUP (preference-change only)
+    action="write"   → write configs only, no signal (rate-limited SIGUSR1 path)
     """
     now = int(time.time())
 
@@ -56,21 +57,14 @@ def regenerate_all(
         gw_state: Optional[IPv6GwState] = read_ipv6gw_state(state_dir, uplink.name)
         pd_state: Optional[IPv6PdState] = read_ipv6pd_state(state_dir, uplink.name)
 
-        if restart and gw_state is not None:
-            default_lifetime = gw_state.remaining_lifetime(now)
-            route_lifetime = default_lifetime
-        elif gw_state is not None:
-            # SIGHUP path: write current remaining so config is sane at next restart
+        if gw_state is not None:
             default_lifetime = gw_state.remaining_lifetime(now)
             route_lifetime = default_lifetime
         else:
             default_lifetime = _FALLBACK_LIFETIME
             route_lifetime = _FALLBACK_LIFETIME
 
-        if restart and pd_state is not None:
-            valid_lifetime = pd_state.remaining_vltime(now)
-            preferred_lifetime = pd_state.remaining_pltime(now)
-        elif pd_state is not None:
+        if pd_state is not None:
             valid_lifetime = pd_state.remaining_vltime(now)
             preferred_lifetime = pd_state.remaining_pltime(now)
         else:
@@ -95,10 +89,11 @@ def regenerate_all(
         _write_atomic(conf_path, conf_text)
 
         unit = naming.radvd_unit_name(uplink.name)
-        if restart:
+        if action == "restart":
             _systemctl("restart", unit)
-        else:
+        elif action == "sighup":
             _sighup(unit)
+        # action == "write": configs written, no signal
 
 
 def _derive_prefixes(

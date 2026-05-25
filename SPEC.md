@@ -188,6 +188,7 @@ uplinkmgr:
   routing_table_start: 160      # first per-uplink routing table number (integer)
   rule_priority_start: 29000    # first ip -6 rule priority (integer)
   reject_incompatible_src: false # add prohibit default to per-uplink tables (bool)
+  radvd_min_restart_interval: 60 # minimum seconds between radvd restarts on SIGUSR1 (integer, default: 60)
 
   monitor:
     interval: 10                # seconds between probe cycles (integer, default: 10)
@@ -583,16 +584,27 @@ radvd's `DecrementLifetimes` counters **are not reset on SIGHUP** — they conti
 | Trigger | Action | Why |
 |---------|--------|-----|
 | Uplink state change (UP↔DOWN) | SIGHUP | Only preference tier changes; radvd's live counters are already accurate |
-| SIGUSR1 from hook (new PD or RA data) | `systemctl restart` | Need radvd to pick up fresh lifetime values from the config |
+| SIGUSR1 from hook (new PD or RA data) | `systemctl restart` (rate-limited) or config write only | Fresh lifetimes needed, but some ISPs send RAs every few seconds; rate limiting prevents excessive restarts |
+| SIGUSR2 (admin/unconditional) | `systemctl restart` | Bypass rate limiting; admin-triggered or for testing |
 
-In both cases the daemon first regenerates the config for **all** IPv6 uplinks (a state change can affect other uplinks' preference tiers), then either SIGHUPs or restarts each radvd instance.
+In all cases the daemon first regenerates the config for **all** IPv6 uplinks (a state change can affect other uplinks' preference tiers), then takes the appropriate action.
 
-**For SIGHUP** (state change): lifetime values written to the config are irrelevant to the live countdown — only write updated preference values. The daemon still writes accurate remaining lifetimes so the config is correct if radvd happens to be restarted later for another reason.
+**For SIGHUP** (state change): the daemon writes configs with accurate remaining lifetimes (for correctness at next restart), then SIGHUPs each radvd instance. radvd picks up only the preference change; its live counters continue unaffected.
 
-**For restart** (SIGUSR1): the daemon reads all state files and computes remaining lifetimes (`max(0, value - (now - timestamp))`). For values just renewed by dhcpcd, this is approximately the full new lifetime. Writes configs, then restarts radvd instances:
+**For restart** (SIGUSR1 or SIGUSR2): the daemon reads all state files and computes remaining lifetimes (`max(0, value - (now - timestamp))`), writes configs, then restarts radvd instances:
 ```python
 subprocess.run(['systemctl', 'restart', f'radvd-uplinkmgr-{name}.service'])
 ```
+
+**SIGUSR1 rate limiting:** Many ISPs (notably Spectrum) send Router Advertisements at very short intervals (as frequently as once every 2 seconds). Without rate limiting, every RA event from the dhcpcd hook would trigger a full radvd restart. The `radvd_min_restart_interval` config option (default: 60s) controls the minimum time between radvd restarts triggered by SIGUSR1.
+
+On each SIGUSR1, the daemon checks two conditions:
+1. **Elapsed time:** seconds since the last radvd restart ≥ `radvd_min_restart_interval`
+2. **Lifetime urgency:** the minimum remaining upstream RA lifetime across all IPv6 uplinks ≤ `radvd_min_restart_interval` (prevents the config from going stale when the gateway lifetime is short)
+
+If either condition is true, radvd is restarted and `_last_radvd_restart` is updated. Otherwise the config files are written (so they stay accurate for the next restart or SIGHUP), but radvd is not restarted, and a debug-level log message records the skip.
+
+Uplinks with `nd1_lifetime = 0` (infinite router lifetime) are excluded from the lifetime urgency check.
 
 #### 5.3.6 Main Loop
 

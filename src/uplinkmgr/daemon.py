@@ -28,6 +28,8 @@ class Daemon:
         self._states: dict[str, UplinkState] = {}
         self._reload_requested = False
         self._sigusr1_received = False
+        self._sigusr2_received = False
+        self._last_radvd_restart: float = 0.0
         self._running = True
 
     # ------------------------------------------------------------------
@@ -51,6 +53,9 @@ class Daemon:
             if self._reload_requested:
                 self._do_reload()
 
+            if self._sigusr2_received:
+                self._do_sigusr2()
+
             if self._sigusr1_received:
                 self._do_sigusr1()
 
@@ -66,9 +71,10 @@ class Daemon:
                 self._sleep(interval - elapsed)
 
     def _sleep(self, seconds: float) -> None:
-        """Sleep, but wake early on SIGUSR1 or SIGHUP."""
+        """Sleep, but wake early on SIGUSR1, SIGUSR2, or SIGHUP."""
         deadline = time.monotonic() + seconds
-        while self._running and not self._reload_requested and not self._sigusr1_received:
+        while (self._running and not self._reload_requested
+               and not self._sigusr1_received and not self._sigusr2_received):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -83,6 +89,7 @@ class Daemon:
         signal.signal(signal.SIGINT, self._handle_term)
         signal.signal(signal.SIGHUP, self._handle_hup)
         signal.signal(signal.SIGUSR1, self._handle_usr1)
+        signal.signal(signal.SIGUSR2, self._handle_usr2)
 
     def _handle_term(self, signum, frame) -> None:
         log.info("received signal %d, shutting down", signum)
@@ -94,6 +101,9 @@ class Daemon:
 
     def _handle_usr1(self, signum, frame) -> None:
         self._sigusr1_received = True
+
+    def _handle_usr2(self, signum, frame) -> None:
+        self._sigusr2_received = True
 
     # ------------------------------------------------------------------
     # Reload
@@ -112,18 +122,67 @@ class Daemon:
         log.info("config reloaded; all uplink states reset to UP")
 
     # ------------------------------------------------------------------
-    # SIGUSR1 — new RA or PD state from hook
+    # SIGUSR1 — new RA or PD state from hook (rate-limited radvd restart)
+    # SIGUSR2 — unconditional radvd restart (admin override)
     # ------------------------------------------------------------------
 
-    def _do_sigusr1(self) -> None:
-        self._sigusr1_received = False
-        log.debug("SIGUSR1 received — refreshing radvd with new lifetime data")
+    def _do_sigusr2(self) -> None:
+        self._sigusr2_received = False
+        log.debug("SIGUSR2: unconditional radvd restart")
         radvd.regenerate_all(
             cfg=self._cfg,
             states=self._states,
             state_dir=self._state_dir,
-            restart=True,
+            action="restart",
         )
+        self._last_radvd_restart = time.monotonic()
+
+    def _do_sigusr1(self) -> None:
+        self._sigusr1_received = False
+        min_interval = self._cfg.radvd_min_restart_interval
+        now_mono = time.monotonic()
+        elapsed = now_mono - self._last_radvd_restart
+        min_remaining = self._min_gw_remaining()
+
+        if (elapsed >= min_interval
+                or (min_remaining is not None and min_remaining <= min_interval)):
+            log.debug("SIGUSR1: restarting radvd (elapsed=%.0fs, min_gw_remaining=%s)",
+                      elapsed, min_remaining)
+            radvd.regenerate_all(
+                cfg=self._cfg,
+                states=self._states,
+                state_dir=self._state_dir,
+                action="restart",
+            )
+            self._last_radvd_restart = now_mono
+        else:
+            log.debug("SIGUSR1: skipping radvd restart "
+                      "(elapsed=%.0fs < interval=%ds, min_gw_remaining=%s)",
+                      elapsed, min_interval, min_remaining)
+            radvd.regenerate_all(
+                cfg=self._cfg,
+                states=self._states,
+                state_dir=self._state_dir,
+                action="write",
+            )
+
+    def _min_gw_remaining(self) -> Optional[int]:
+        """Return the minimum remaining upstream RA lifetime across all IPv6 uplinks.
+
+        Returns None when all uplinks have infinite lifetime (nd1_lifetime=0) or no state.
+        """
+        now = int(time.time())
+        min_val: Optional[int] = None
+        for uplink in self._cfg.uplinks:
+            if not uplink.ipv6_pd:
+                continue
+            gw = state.read_ipv6gw_state(self._state_dir, uplink.name)
+            if gw is None or gw.nd1_lifetime == 0:
+                continue  # absent or infinite
+            remaining = gw.remaining_lifetime(now)
+            if min_val is None or remaining < min_val:
+                min_val = remaining
+        return min_val
 
     # ------------------------------------------------------------------
     # Monitoring cycle
@@ -174,7 +233,7 @@ class Daemon:
                 cfg=cfg,
                 states=self._states,
                 state_dir=self._state_dir,
-                restart=False,  # preference change only → SIGHUP
+                action="sighup",  # preference change only → SIGHUP
             )
 
     def _apply_ipv4_change(self, uplink, st: UplinkState) -> None:

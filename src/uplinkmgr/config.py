@@ -18,6 +18,7 @@ except ImportError:
 DEFAULT_CONFIG_PATH = "/etc/uplinkmgr/uplinkmgr.yaml"
 DEFAULT_ROUTING_TABLE_START = 160
 DEFAULT_RULE_PRIORITY_START = 29000
+DEFAULT_RADVD_MIN_RESTART_INTERVAL = 60
 DEFAULT_MONITOR_INTERVAL = 10
 DEFAULT_FAILURE_THRESHOLD = 3
 DEFAULT_RECOVERY_THRESHOLD = 3
@@ -57,6 +58,7 @@ class Config:
     routing_table_start: int
     rule_priority_start: int
     reject_incompatible_src: bool
+    radvd_min_restart_interval: int
     monitor: MonitorConfig
     networks: list[NetworkConfig]
     uplinks: list[UplinkConfig]
@@ -89,6 +91,8 @@ def load(path: str = DEFAULT_CONFIG_PATH) -> Config:
     routing_table_start = int(top.get("routing_table_start", DEFAULT_ROUTING_TABLE_START))
     rule_priority_start = int(top.get("rule_priority_start", DEFAULT_RULE_PRIORITY_START))
     reject_incompatible_src = bool(top.get("reject_incompatible_src", False))
+    radvd_min_restart_interval = int(top.get("radvd_min_restart_interval",
+                                              DEFAULT_RADVD_MIN_RESTART_INTERVAL))
 
     if not (1 <= routing_table_start <= 252):
         _die(f"routing_table_start must be 1–252, got {routing_table_start}")
@@ -113,6 +117,7 @@ def load(path: str = DEFAULT_CONFIG_PATH) -> Config:
         routing_table_start=routing_table_start,
         rule_priority_start=rule_priority_start,
         reject_incompatible_src=reject_incompatible_src,
+        radvd_min_restart_interval=radvd_min_restart_interval,
         monitor=monitor,
         networks=networks,
         uplinks=uplinks,
