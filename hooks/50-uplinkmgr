@@ -134,7 +134,6 @@ case "$reason" in
 
         elif [ "$_is_macvlan" = true ]; then
             _mv_idx=$(macvlan_index_for_iface "$interface") || return 1
-            _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
 
             # Suppress rule: try the main table first, but ignore the default
             # route.  This keeps inter-VLAN traffic (where a connected /64 exists
@@ -148,6 +147,7 @@ case "$reason" in
             # When reject_incompatible_src is on, restrict to the uplink's
             # delegated prefix; a catch-all prohibit rule then drops mismatches.
             # When the option is off, a plain iif rule accepts all sources.
+            _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
             ip -6 rule del priority "$_rule_priority" 2>/dev/null || true
             if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
                 DELEGATED_PREFIX="${new_dhcp6_ia_pd1_prefix1:-}"
@@ -176,9 +176,8 @@ case "$reason" in
         [ "$_is_macvlan" = true ] || return 0
 
         _mv_idx=$(macvlan_index_for_iface "$interface") || return 1
-        _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
-
         _suppress_priority=$(( UPLINKMGR_SUPPRESS_RULE_PRIORITY_START + _mv_idx ))
+        _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
         ip -6 rule del priority "$_suppress_priority" 2>/dev/null || true
         ip -6 rule del priority "$_rule_priority" 2>/dev/null || true
         if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
