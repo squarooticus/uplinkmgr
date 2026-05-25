@@ -13,12 +13,27 @@ env_file="${UPLINKMGR_ENV_DIR}/${interface}.env"
 [ -f "$env_file" ] || return 0
 . "$env_file"
 
-# --- Helper: signal the daemon ---
+# --- Helpers ---
 
 _signal_daemon() {
     if [ -f "$UPLINKMGR_PID_FILE" ]; then
         kill -USR1 "$(cat "$UPLINKMGR_PID_FILE")" 2>/dev/null || true
     fi
+}
+
+# Print the 0-based index of $1 within $UPLINKMGR_MACVLAN_INTERFACES.
+# Returns 1 (and logs to stderr) if the interface is not found.
+macvlan_index_for_iface() {
+    _idx=0
+    for _m in $UPLINKMGR_MACVLAN_INTERFACES; do
+        if [ "$_m" = "$1" ]; then
+            echo "$_idx"
+            return 0
+        fi
+        _idx=$(( _idx + 1 ))
+    done
+    echo "uplinkmgr: interface '$1' not found in UPLINKMGR_MACVLAN_INTERFACES" >&2
+    return 1
 }
 
 # --- Determine interface role ---
@@ -118,16 +133,8 @@ case "$reason" in
             fi
 
         elif [ "$_is_macvlan" = true ]; then
-            # Determine rule priority for this macvlan
-            _mv_idx=0
-            _rule_priority="$UPLINKMGR_RULE_PRIORITY_START"
-            for _mv in $UPLINKMGR_MACVLAN_INTERFACES; do
-                if [ "$_mv" = "$interface" ]; then
-                    _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
-                    break
-                fi
-                _mv_idx=$(( _mv_idx + 1 ))
-            done
+            _mv_idx=$(macvlan_index_for_iface "$interface") || return 1
+            _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
 
             # Suppress rule: try the main table first, but ignore the default
             # route.  This keeps inter-VLAN traffic (where a connected /64 exists
@@ -168,15 +175,8 @@ case "$reason" in
         fi
         [ "$_is_macvlan" = true ] || return 0
 
-        _mv_idx=0
-        _rule_priority="$UPLINKMGR_RULE_PRIORITY_START"
-        for _mv in $UPLINKMGR_MACVLAN_INTERFACES; do
-            if [ "$_mv" = "$interface" ]; then
-                _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
-                break
-            fi
-            _mv_idx=$(( _mv_idx + 1 ))
-        done
+        _mv_idx=$(macvlan_index_for_iface "$interface") || return 1
+        _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
 
         _suppress_priority=$(( UPLINKMGR_SUPPRESS_RULE_PRIORITY_START + _mv_idx ))
         ip -6 rule del priority "$_suppress_priority" 2>/dev/null || true
