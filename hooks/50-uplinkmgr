@@ -126,10 +126,10 @@ case "$reason" in
             # uplink's routing table rather than falling through to the main
             # table and going out the wrong interface.
             if [ -n "$new_ip6_address" ]; then
-                ip -6 rule del priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
+                ip -6 rule del priority "$UPLINKMGR_LO_TO_UPLINK_PRIORITY" 2>/dev/null || true
                 ip -6 rule add from "${new_ip6_address}/128" iif lo \
                     lookup "$UPLINKMGR_TABLE_NUM" \
-                    priority "$UPLINKMGR_WAN_RULE_PRIORITY"
+                    priority "$UPLINKMGR_LO_TO_UPLINK_PRIORITY"
             fi
 
         elif [ "$_is_macvlan" = true ]; then
@@ -138,31 +138,31 @@ case "$reason" in
             # Suppress rule: try the main table first, but ignore the default
             # route.  This keeps inter-VLAN traffic (where a connected /64 exists
             # in main) out of the uplink table without affecting internet traffic.
-            _suppress_priority=$(( UPLINKMGR_SUPPRESS_RULE_PRIORITY_START + _mv_idx ))
-            ip -6 rule del priority "$_suppress_priority" 2>/dev/null || true
+            _internal_traffic_priority=$(( UPLINKMGR_INTERNAL_TRAFFIC_PRIORITY_START + _mv_idx ))
+            ip -6 rule del priority "$_internal_traffic_priority" 2>/dev/null || true
             ip -6 rule add iif "$interface" lookup main suppress_prefixlength 0 \
-                priority "$_suppress_priority"
+                priority "$_internal_traffic_priority"
 
             # Lookup rule: route remaining traffic through the per-uplink table.
             # When reject_incompatible_src is on, restrict to the uplink's
             # delegated prefix; a catch-all prohibit rule then drops mismatches.
             # When the option is off, a plain iif rule accepts all sources.
-            _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
-            ip -6 rule del priority "$_rule_priority" 2>/dev/null || true
+            _fwd_to_uplink_priority=$(( UPLINKMGR_FWD_TO_UPLINK_PRIORITY_START + _mv_idx ))
+            ip -6 rule del priority "$_fwd_to_uplink_priority" 2>/dev/null || true
             if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
                 DELEGATED_PREFIX="${new_dhcp6_ia_pd1_prefix1:-}"
                 DELEGATED_LENGTH="${new_dhcp6_ia_pd1_prefix1_length:-}"
                 [ -n "$DELEGATED_PREFIX" ] && [ -n "$DELEGATED_LENGTH" ] || return 0
                 ip -6 rule add from "${DELEGATED_PREFIX}/${DELEGATED_LENGTH}" \
                     iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
-                    priority "$_rule_priority"
-                _prohibit_priority=$(( UPLINKMGR_REJECT_RULE_PRIORITY_START + _mv_idx ))
-                ip -6 rule del priority "$_prohibit_priority" 2>/dev/null || true
+                    priority "$_fwd_to_uplink_priority"
+                _prohibit_wrong_src_priority=$(( UPLINKMGR_PROHIBIT_WRONG_SRC_PRIORITY_START + _mv_idx ))
+                ip -6 rule del priority "$_prohibit_wrong_src_priority" 2>/dev/null || true
                 ip -6 rule add iif "$interface" prohibit \
-                    priority "$_prohibit_priority"
+                    priority "$_prohibit_wrong_src_priority"
             else
                 ip -6 rule add iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
-                    priority "$_rule_priority"
+                    priority "$_fwd_to_uplink_priority"
             fi
         fi
         ;;
@@ -170,19 +170,19 @@ case "$reason" in
     # IPv6 expiry: WAN interface (remove source routing rule) + macvlan interfaces
     EXPIRE6|STOP6)
         if [ "$_is_wan" = true ] && [ "$UPLINKMGR_IPV6_PD" = true ]; then
-            ip -6 rule del priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
+            ip -6 rule del priority "$UPLINKMGR_LO_TO_UPLINK_PRIORITY" 2>/dev/null || true
             return 0
         fi
         [ "$_is_macvlan" = true ] || return 0
 
         _mv_idx=$(macvlan_index_for_iface "$interface") || return 1
-        _suppress_priority=$(( UPLINKMGR_SUPPRESS_RULE_PRIORITY_START + _mv_idx ))
-        _rule_priority=$(( UPLINKMGR_RULE_PRIORITY_START + _mv_idx ))
-        ip -6 rule del priority "$_suppress_priority" 2>/dev/null || true
-        ip -6 rule del priority "$_rule_priority" 2>/dev/null || true
+        _internal_traffic_priority=$(( UPLINKMGR_INTERNAL_TRAFFIC_PRIORITY_START + _mv_idx ))
+        _fwd_to_uplink_priority=$(( UPLINKMGR_FWD_TO_UPLINK_PRIORITY_START + _mv_idx ))
+        ip -6 rule del priority "$_internal_traffic_priority" 2>/dev/null || true
+        ip -6 rule del priority "$_fwd_to_uplink_priority" 2>/dev/null || true
         if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
-            _prohibit_priority=$(( UPLINKMGR_REJECT_RULE_PRIORITY_START + _mv_idx ))
-            ip -6 rule del priority "$_prohibit_priority" 2>/dev/null || true
+            _prohibit_wrong_src_priority=$(( UPLINKMGR_PROHIBIT_WRONG_SRC_PRIORITY_START + _mv_idx ))
+            ip -6 rule del priority "$_prohibit_wrong_src_priority" 2>/dev/null || true
         fi
         ;;
 

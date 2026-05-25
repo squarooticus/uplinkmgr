@@ -239,15 +239,15 @@ def env_file(cfg: Config, uplink: UplinkConfig) -> str:
     tbl_num = naming.table_num(cfg.routing_table_start, uplink.index)
     tname = naming.table_name(uplink.name)
     N = len(cfg.uplinks) * len(cfg.networks)  # total macvlan slots
-    # Band S — suppress rules (iif <macvlan> lookup main suppress_prefixlength 0):
-    #   keeps inter-VLAN traffic in the main table; lets internet traffic fall through.
-    suppress_prio_start = cfg.rule_priority_start + uplink.index * len(cfg.networks)
-    # Band 1 — macvlan lookup rules (iif or from+iif → per-uplink table):
-    uplink_rule_prio_start = cfg.rule_priority_start + N + uplink.index * len(cfg.networks)
-    # Band 2 — WAN from+iif lo rules (locally-generated traffic):
-    wan_rule_priority = cfg.rule_priority_start + 2 * N + uplink.index
-    # Band 3 — prohibit catch-alls (reject_incompatible_src only):
-    reject_rule_prio_start = (
+    # internal_traffic: iif <macvlan> lookup main suppress_prefixlength 0
+    #   keeps inter-VLAN traffic in the main table; internet traffic falls through
+    internal_traffic_prio_start = cfg.rule_priority_start + uplink.index * len(cfg.networks)
+    # fwd_to_uplink: iif or from+iif → per-uplink table (forwarded traffic)
+    fwd_to_uplink_prio_start = cfg.rule_priority_start + N + uplink.index * len(cfg.networks)
+    # lo_to_uplink: from <ia-na>/128 iif lo (locally-generated traffic)
+    lo_to_uplink_priority = cfg.rule_priority_start + 2 * N + uplink.index
+    # prohibit_wrong_src: iif <macvlan> prohibit (reject_incompatible_src only)
+    prohibit_wrong_src_prio_start = (
         cfg.rule_priority_start + 2 * N + len(cfg.uplinks)
         + uplink.index * len(cfg.networks)
     )
@@ -260,10 +260,10 @@ def env_file(cfg: Config, uplink: UplinkConfig) -> str:
         f"UPLINKMGR_TABLE_NAME={tname}\n"
         f"UPLINKMGR_TABLE_NUM={tbl_num}\n"
         f"UPLINKMGR_WAN_IFACE={uplink.interface}\n"
-        f"UPLINKMGR_SUPPRESS_RULE_PRIORITY_START={suppress_prio_start}\n"
-        f"UPLINKMGR_RULE_PRIORITY_START={uplink_rule_prio_start}\n"
-        f"UPLINKMGR_WAN_RULE_PRIORITY={wan_rule_priority}\n"
-        f"UPLINKMGR_REJECT_RULE_PRIORITY_START={reject_rule_prio_start}\n"
+        f"UPLINKMGR_INTERNAL_TRAFFIC_PRIORITY_START={internal_traffic_prio_start}\n"
+        f"UPLINKMGR_FWD_TO_UPLINK_PRIORITY_START={fwd_to_uplink_prio_start}\n"
+        f"UPLINKMGR_LO_TO_UPLINK_PRIORITY={lo_to_uplink_priority}\n"
+        f"UPLINKMGR_PROHIBIT_WRONG_SRC_PRIORITY_START={prohibit_wrong_src_prio_start}\n"
         f"UPLINKMGR_MACVLAN_INTERFACES=\"{macvlan_ifaces}\"\n"
         f"UPLINKMGR_IPV6_PD={'true' if uplink.ipv6_pd else 'false'}\n"
         f"UPLINKMGR_REJECT_INCOMPATIBLE_SRC="
