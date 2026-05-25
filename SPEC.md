@@ -455,14 +455,13 @@ Actions:
    fi
    ```
 
-4. Install a source-address rule for locally-generated traffic (idempotent). Without this, packets with `$new_ip6_address` as source would fall through to the main routing table and egress via the wrong uplink:
+4. Install a source-address rule for locally-generated traffic (idempotent). `iif lo` restricts the rule to locally-originated packets, preventing it from matching inbound packets that happen to carry the IA_NA address as source:
    ```sh
-   ip -6 rule del from "${new_ip6_address}/128" lookup "$UPLINKMGR_TABLE_NUM" \
-       priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
-   ip -6 rule add from "${new_ip6_address}/128" lookup "$UPLINKMGR_TABLE_NUM" \
+   ip -6 rule del priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
+   ip -6 rule add from "${new_ip6_address}/128" iif lo lookup "$UPLINKMGR_TABLE_NUM" \
        priority "$UPLINKMGR_WAN_RULE_PRIORITY"
    ```
-   `UPLINKMGR_WAN_RULE_PRIORITY` is `rule_priority_start + len(uplinks) * len(networks) + uplink_index` — one slot per uplink, in the band above all macvlan `iif` rules.
+   `UPLINKMGR_WAN_RULE_PRIORITY` is `rule_priority_start + 2*N + uplink_index` (Band 2), where `N = len(uplinks) * len(networks)`.
 
 #### 5.2.8 IPv6 BOUND6 / RENEW6 (macvlan interfaces — route and rule setup)
 
@@ -472,7 +471,15 @@ This event fires after dhcpcd has assigned a delegated sub-prefix to a macvlan i
 
 Actions:
 
-1. Install the policy routing rule linking this macvlan to the per-uplink table (idempotent). The form depends on `reject_incompatible_src`:
+1. Install the suppress rule (idempotent). This causes traffic arriving on this macvlan to be looked up in the main table first, but only if a more-specific route than the default exists there. Inter-VLAN traffic (destined for another internal /64) uses the main table's connected route; internet-bound traffic falls through to the per-uplink table:
+   ```sh
+   ip -6 rule del priority "$SUPPRESS_PRIORITY" 2>/dev/null || true
+   ip -6 rule add iif "$interface" lookup main suppress_prefixlength 0 \
+       priority "$SUPPRESS_PRIORITY"
+   ```
+   where `SUPPRESS_PRIORITY` = `UPLINKMGR_SUPPRESS_RULE_PRIORITY_START + macvlan_sequential_index` (Band S).
+
+2. Install the policy routing rule linking this macvlan to the per-uplink table (idempotent). The form depends on `reject_incompatible_src`:
 
    **`reject_incompatible_src` off** — accept all incoming source addresses:
    ```sh
@@ -503,11 +510,15 @@ ip -6 rule del priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
 
 **Macvlan interfaces:**
 
-1. Remove the policy routing rule (delete by priority; works whether the rule has a `from` constraint or not):
+1. Remove the suppress rule:
+   ```sh
+   ip -6 rule del priority "$SUPPRESS_PRIORITY" 2>/dev/null || true
+   ```
+2. Remove the policy routing rule (delete by priority; works whether the rule has a `from` constraint or not):
    ```sh
    ip -6 rule del priority "$RULE_PRIORITY" 2>/dev/null || true
    ```
-2. If `reject_incompatible_src` is enabled, also remove the prohibit catch-all rule:
+3. If `reject_incompatible_src` is enabled, also remove the prohibit catch-all rule:
    ```sh
    ip -6 rule del priority "$PROHIBIT_PRIORITY" 2>/dev/null || true
    ```
@@ -1007,35 +1018,44 @@ This must be set before the interface is brought up, which is why it appears in 
 
 ### 7.5 ip -6 Rule Priorities
 
-ip -6 rules are assigned priorities from `rule_priority_start` upward in up to three bands:
+ip -6 rules are assigned priorities from `rule_priority_start` upward in up to four bands. Let `N = len(uplinks) * len(networks)`.
+
+**Band S — macvlan suppress rules** (always present):
+`rule_priority_start + uplink_idx * len(networks) + net_idx`
+Rule: `iif <macvlan> lookup main suppress_prefixlength 0`
+Sends inter-VLAN traffic through the main table (connected routes); lets internet-bound traffic fall through when only the default route matches.
 
 **Band 1 — macvlan lookup rules** (forwarded traffic from internal clients):
-`rule_priority_start + uplink_idx * len(networks) + net_idx`
+`rule_priority_start + N + uplink_idx * len(networks) + net_idx`
 - `reject_incompatible_src` off: `iif <macvlan> lookup <table>`
-- `reject_incompatible_src` on: `from <prefix>/64 iif <macvlan> lookup <table>`
+- `reject_incompatible_src` on: `from <delegated-prefix>/<len> iif <macvlan> lookup <table>`
 
-**Band 2 — WAN `from` rules** (locally-generated traffic on the router itself):
-`rule_priority_start + len(uplinks) * len(networks) + uplink_idx`
-Rule: `from <ia-na>/128 lookup <table>`
+**Band 2 — WAN `from iif lo` rules** (locally-generated traffic on the router itself):
+`rule_priority_start + 2*N + uplink_idx`
+Rule: `from <ia-na>/128 iif lo lookup <table>`
+`iif lo` restricts the rule to locally-originated packets only.
 
 **Band 3 — macvlan prohibit catch-alls** (only when `reject_incompatible_src` is on):
-`rule_priority_start + len(uplinks) * (len(networks) + 1) + uplink_idx * len(networks) + net_idx`
+`rule_priority_start + 2*N + len(uplinks) + uplink_idx * len(networks) + net_idx`
 Rule: `iif <macvlan> prohibit`
-These fire for traffic arriving on a macvlan whose source address did not match the Band 1 `from` constraint, i.e., it belongs to a different uplink's prefix.
 
 Example with 2 uplinks (`comcast`=0, `starlink`=1), 2 internal interfaces, `reject_incompatible_src` on:
-- Priority 29000: `from <comcast-delegated>/60 iif vlan10-u0 lookup uplinkmgr_comcast`
-- Priority 29001: `from <comcast-delegated>/60 iif vlan20-u0 lookup uplinkmgr_comcast`
-- Priority 29002: `from <starlink-delegated>/60 iif vlan10-u1 lookup uplinkmgr_starlink`
-- Priority 29003: `from <starlink-delegated>/60 iif vlan20-u1 lookup uplinkmgr_starlink`
-- Priority 29004: `from <comcast-ia-na>/128 lookup uplinkmgr_comcast`
-- Priority 29005: `from <starlink-ia-na>/128 lookup uplinkmgr_starlink`
-- Priority 29006: `iif vlan10-u0 prohibit`
-- Priority 29007: `iif vlan20-u0 prohibit`
-- Priority 29008: `iif vlan10-u1 prohibit`
-- Priority 29009: `iif vlan20-u1 prohibit`
+- Priority 29000: `iif vlan10-u0 lookup main suppress_prefixlength 0`  (Band S)
+- Priority 29001: `iif vlan20-u0 lookup main suppress_prefixlength 0`
+- Priority 29002: `iif vlan10-u1 lookup main suppress_prefixlength 0`
+- Priority 29003: `iif vlan20-u1 lookup main suppress_prefixlength 0`
+- Priority 29004: `from <comcast-delegated>/60 iif vlan10-u0 lookup uplinkmgr_comcast`  (Band 1)
+- Priority 29005: `from <comcast-delegated>/60 iif vlan20-u0 lookup uplinkmgr_comcast`
+- Priority 29006: `from <starlink-delegated>/60 iif vlan10-u1 lookup uplinkmgr_starlink`
+- Priority 29007: `from <starlink-delegated>/60 iif vlan20-u1 lookup uplinkmgr_starlink`
+- Priority 29008: `from <comcast-ia-na>/128 iif lo lookup uplinkmgr_comcast`  (Band 2)
+- Priority 29009: `from <starlink-ia-na>/128 iif lo lookup uplinkmgr_starlink`
+- Priority 29010: `iif vlan10-u0 prohibit`  (Band 3)
+- Priority 29011: `iif vlan20-u0 prohibit`
+- Priority 29012: `iif vlan10-u1 prohibit`
+- Priority 29013: `iif vlan20-u1 prohibit`
 
-The configured range `[rule_priority_start, rule_priority_start + 99]` supports up to 100 rules. With `reject_incompatible_src` on the count is `len(uplinks) * (2 * len(networks) + 1)`, e.g. 5 uplinks × 4 networks = 45 rules.
+The configured range `[rule_priority_start, rule_priority_start + 99]` supports up to 100 rules. With `reject_incompatible_src` on the count is `N*3 + len(uplinks)` = `len(uplinks) * (3*len(networks) + 1)`, e.g. 5 uplinks × 4 networks = 65 rules.
 
 ### 7.6 SLA IDs for IPv6 PD
 

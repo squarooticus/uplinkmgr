@@ -238,18 +238,17 @@ def env_file(cfg: Config, uplink: UplinkConfig) -> str:
 
     tbl_num = naming.table_num(cfg.routing_table_start, uplink.index)
     tname = naming.table_name(uplink.name)
-    # Rule priorities are globally sequential: uplink N starts at
-    # rule_priority_start + N * len(networks), one slot per macvlan.
-    uplink_rule_prio_start = cfg.rule_priority_start + uplink.index * len(cfg.networks)
-    # WAN from-rules: one slot per uplink, above all macvlan iif rules.
-    wan_rule_priority = (
-        cfg.rule_priority_start + len(cfg.uplinks) * len(cfg.networks) + uplink.index
-    )
-    # Prohibit catch-all rules (reject_incompatible_src): one slot per macvlan,
-    # in the band above the WAN from-rules.
+    N = len(cfg.uplinks) * len(cfg.networks)  # total macvlan slots
+    # Band S — suppress rules (iif <macvlan> lookup main suppress_prefixlength 0):
+    #   keeps inter-VLAN traffic in the main table; lets internet traffic fall through.
+    suppress_prio_start = cfg.rule_priority_start + uplink.index * len(cfg.networks)
+    # Band 1 — macvlan lookup rules (iif or from+iif → per-uplink table):
+    uplink_rule_prio_start = cfg.rule_priority_start + N + uplink.index * len(cfg.networks)
+    # Band 2 — WAN from+iif lo rules (locally-generated traffic):
+    wan_rule_priority = cfg.rule_priority_start + 2 * N + uplink.index
+    # Band 3 — prohibit catch-alls (reject_incompatible_src only):
     reject_rule_prio_start = (
-        cfg.rule_priority_start
-        + len(cfg.uplinks) * (len(cfg.networks) + 1)
+        cfg.rule_priority_start + 2 * N + len(cfg.uplinks)
         + uplink.index * len(cfg.networks)
     )
 
@@ -261,6 +260,7 @@ def env_file(cfg: Config, uplink: UplinkConfig) -> str:
         f"UPLINKMGR_TABLE_NAME={tname}\n"
         f"UPLINKMGR_TABLE_NUM={tbl_num}\n"
         f"UPLINKMGR_WAN_IFACE={uplink.interface}\n"
+        f"UPLINKMGR_SUPPRESS_RULE_PRIORITY_START={suppress_prio_start}\n"
         f"UPLINKMGR_RULE_PRIORITY_START={uplink_rule_prio_start}\n"
         f"UPLINKMGR_WAN_RULE_PRIORITY={wan_rule_priority}\n"
         f"UPLINKMGR_REJECT_RULE_PRIORITY_START={reject_rule_prio_start}\n"

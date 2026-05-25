@@ -111,10 +111,8 @@ case "$reason" in
             # uplink's routing table rather than falling through to the main
             # table and going out the wrong interface.
             if [ -n "$new_ip6_address" ]; then
-                ip -6 rule del from "${new_ip6_address}/128" \
-                    lookup "$UPLINKMGR_TABLE_NUM" \
-                    priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
-                ip -6 rule add from "${new_ip6_address}/128" \
+                ip -6 rule del priority "$UPLINKMGR_WAN_RULE_PRIORITY" 2>/dev/null || true
+                ip -6 rule add from "${new_ip6_address}/128" iif lo \
                     lookup "$UPLINKMGR_TABLE_NUM" \
                     priority "$UPLINKMGR_WAN_RULE_PRIORITY"
             fi
@@ -131,13 +129,18 @@ case "$reason" in
                 _mv_idx=$(( _mv_idx + 1 ))
             done
 
-            # Install policy routing rule (idempotent).
-            # When reject_incompatible_src is on, restrict the lookup rule to
-            # the entire delegated prefix space for this uplink so that traffic
-            # with a source address from a different uplink does not match.
-            # A catch-all prohibit rule at a lower priority then rejects the
-            # mismatched traffic.  When the option is off, a plain iif rule
-            # accepts all sources.
+            # Suppress rule: try the main table first, but ignore the default
+            # route.  This keeps inter-VLAN traffic (where a connected /64 exists
+            # in main) out of the uplink table without affecting internet traffic.
+            _suppress_priority=$(( UPLINKMGR_SUPPRESS_RULE_PRIORITY_START + _mv_idx ))
+            ip -6 rule del priority "$_suppress_priority" 2>/dev/null || true
+            ip -6 rule add iif "$interface" lookup main suppress_prefixlength 0 \
+                priority "$_suppress_priority"
+
+            # Lookup rule: route remaining traffic through the per-uplink table.
+            # When reject_incompatible_src is on, restrict to the uplink's
+            # delegated prefix; a catch-all prohibit rule then drops mismatches.
+            # When the option is off, a plain iif rule accepts all sources.
             ip -6 rule del priority "$_rule_priority" 2>/dev/null || true
             if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
                 DELEGATED_PREFIX="${new_dhcp6_ia_pd1_prefix1:-}"
@@ -175,6 +178,8 @@ case "$reason" in
             _mv_idx=$(( _mv_idx + 1 ))
         done
 
+        _suppress_priority=$(( UPLINKMGR_SUPPRESS_RULE_PRIORITY_START + _mv_idx ))
+        ip -6 rule del priority "$_suppress_priority" 2>/dev/null || true
         ip -6 rule del priority "$_rule_priority" 2>/dev/null || true
         if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
             _prohibit_priority=$(( UPLINKMGR_REJECT_RULE_PRIORITY_START + _mv_idx ))
