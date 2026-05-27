@@ -28,6 +28,11 @@ class IPv6GwState:
 
 
 @dataclass
+class IPv6NaState:
+    address: str
+
+
+@dataclass
 class IPv6PdState:
     delegated_prefix: str
     delegated_length: int
@@ -62,6 +67,11 @@ def read_ipv6gw_state(state_dir: str, uplink_name: str) -> Optional[IPv6GwState]
         "nd1_lifetime": int,
         "timestamp": int,
     })
+
+
+def read_ipv6na_state(state_dir: str, uplink_name: str) -> Optional[IPv6NaState]:
+    path = Path(state_dir) / f"{uplink_name}.ipv6na.state"
+    return _read_kv_state(path, IPv6NaState, {"address": str})
 
 
 def read_ipv6pd_state(state_dir: str, uplink_name: str) -> Optional[IPv6PdState]:

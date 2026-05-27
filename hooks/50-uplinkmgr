@@ -13,6 +13,9 @@ env_file="${UPLINKMGR_ENV_DIR}/${interface}.env"
 [ -f "$env_file" ] || return 0
 . "$env_file"
 
+# Only process events on the WAN interface; macvlan events are ignored.
+[ "$interface" = "$UPLINKMGR_WAN_IFACE" ] || return 0
+
 # --- Helpers ---
 
 _signal_daemon() {
@@ -21,65 +24,34 @@ _signal_daemon() {
     fi
 }
 
-# Print the 0-based index of $1 within $UPLINKMGR_MACVLAN_INTERFACES.
-# Returns 1 (and logs to stderr) if the interface is not found.
-macvlan_index_for_iface() {
-    _idx=0
-    for _m in $UPLINKMGR_MACVLAN_INTERFACES; do
-        if [ "$_m" = "$1" ]; then
-            echo "$_idx"
-            return 0
-        fi
-        _idx=$(( _idx + 1 ))
-    done
-    echo "uplinkmgr: interface '$1' not found in UPLINKMGR_MACVLAN_INTERFACES" >&2
-    return 1
+_write_state_file() {
+    local _target="$1"; shift
+    local _tmp="${_target}.tmp"
+    printf "$@" > "$_tmp" && mv "$_tmp" "$_target"
 }
-
-# --- Determine interface role ---
-
-_is_wan=false
-_is_macvlan=false
-
-if [ "$interface" = "$UPLINKMGR_WAN_IFACE" ]; then
-    _is_wan=true
-else
-    for _mv in $UPLINKMGR_MACVLAN_INTERFACES; do
-        if [ "$interface" = "$_mv" ]; then
-            _is_macvlan=true
-            break
-        fi
-    done
-fi
 
 # --- Dispatch ---
 
 case "$reason" in
 
-    # IPv4: WAN interface only
+    # IPv4: write gateway state file and signal daemon
     BOUND|RENEW|REBIND|REBOOT)
-        [ "$_is_wan" = true ] || return 0
-
         GW4="${routers%% *}"  # take first gateway
         [ -n "$GW4" ] || return 0
 
         mkdir -p "$UPLINKMGR_STATE_DIR"
-        ip route replace default via "$GW4" dev "$interface" \
-            table "$UPLINKMGR_TABLE_NUM"
-        printf '%s\n' "$GW4" \
-            > "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv4.state"
+        _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv4.state" \
+            '%s\n' "$GW4"
+        _signal_daemon
         ;;
 
     EXPIRE|RELEASE|STOP)
-        [ "$_is_wan" = true ] || return 0
-
-        ip route del default table "$UPLINKMGR_TABLE_NUM" 2>/dev/null || true
         rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv4.state"
+        _signal_daemon
         ;;
 
-    # IPv6 router advertisement: WAN interface only
+    # IPv6 router advertisement: write gateway state file and signal daemon
     ROUTERADVERT)
-        [ "$_is_wan" = true ] || return 0
         [ "$UPLINKMGR_IPV6_PD" = true ] || return 0
 
         GW6="$nd1_from"
@@ -87,103 +59,48 @@ case "$reason" in
 
         [ -n "$GW6" ] || return 0
 
-        if [ "$ND1_LIFETIME" -gt 0 ] 2>/dev/null; then
-            ip -6 route replace default via "$GW6" dev "$interface" \
-                table "$UPLINKMGR_TABLE_NUM" expires "$ND1_LIFETIME"
-        else
-            ip -6 route replace default via "$GW6" dev "$interface" \
-                table "$UPLINKMGR_TABLE_NUM"
-        fi
-
         mkdir -p "$UPLINKMGR_STATE_DIR"
-        printf 'gateway=%s\nnd1_lifetime=%s\ntimestamp=%s\n' \
-            "$GW6" "$ND1_LIFETIME" "$(date +%s)" \
-            > "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6gw.state"
+        _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6gw.state" \
+            'gateway=%s\nnd1_lifetime=%s\ntimestamp=%s\n' \
+            "$GW6" "$ND1_LIFETIME" "$(date +%s)"
 
         _signal_daemon
         ;;
 
-    # IPv6 lease: WAN interface — PD state + source routing rule
+    # IPv6 lease: write PD and IA_NA state files and signal daemon
     BOUND6|RENEW6)
-        if [ "$_is_wan" = true ] && [ "$UPLINKMGR_IPV6_PD" = true ]; then
-            # PD variables are on the WAN interface event
-            DELEGATED_PREFIX="${dhcp6_ia_pd1_prefix1:-}"
-            DELEGATED_LENGTH="${dhcp6_ia_pd1_prefix1_length:-}"
-            VLTIME="${dhcp6_ia_pd1_prefix1_vltime:-}"
-            PLTIME="${dhcp6_ia_pd1_prefix1_pltime:-}"
+        [ "$UPLINKMGR_IPV6_PD" = true ] || return 0
 
-            if [ -n "$DELEGATED_PREFIX" ] && [ -n "$DELEGATED_LENGTH" ]; then
-                mkdir -p "$UPLINKMGR_STATE_DIR"
-                printf 'delegated_prefix=%s\ndelegated_length=%s\nvltime=%s\npltime=%s\ntimestamp=%s\n' \
-                    "$DELEGATED_PREFIX" "$DELEGATED_LENGTH" \
-                    "$VLTIME" "$PLTIME" "$(date +%s)" \
-                    > "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
-                _signal_daemon
-            fi
+        DELEGATED_PREFIX="${dhcp6_ia_pd1_prefix1:-}"
+        DELEGATED_LENGTH="${dhcp6_ia_pd1_prefix1_length:-}"
+        VLTIME="${dhcp6_ia_pd1_prefix1_vltime:-}"
+        PLTIME="${dhcp6_ia_pd1_prefix1_pltime:-}"
 
-            # Install a source-address rule for locally-generated traffic so
-            # that packets with the IA_NA address as source use the correct
-            # uplink's routing table rather than falling through to the main
-            # table and going out the wrong interface.
-            if [ -n "$new_ip6_address" ]; then
-                ip -6 rule del priority "$UPLINKMGR_LO_TO_UPLINK_PRIORITY" 2>/dev/null || true
-                ip -6 rule add from "${new_ip6_address}/128" iif lo \
-                    lookup "$UPLINKMGR_TABLE_NUM" \
-                    priority "$UPLINKMGR_LO_TO_UPLINK_PRIORITY"
-            fi
-
-        elif [ "$_is_macvlan" = true ]; then
-            _mv_idx=$(macvlan_index_for_iface "$interface") || return 1
-
-            # Suppress rule: try the main table first, but ignore the default
-            # route.  This keeps inter-VLAN traffic (where a connected /64 exists
-            # in main) out of the uplink table without affecting internet traffic.
-            _internal_traffic_priority=$(( UPLINKMGR_INTERNAL_TRAFFIC_PRIORITY_START + _mv_idx ))
-            ip -6 rule del priority "$_internal_traffic_priority" 2>/dev/null || true
-            ip -6 rule add iif "$interface" lookup main suppress_prefixlength 0 \
-                priority "$_internal_traffic_priority"
-
-            # Lookup rule: route remaining traffic through the per-uplink table.
-            # When reject_incompatible_src is on, restrict to the uplink's
-            # delegated prefix; a catch-all prohibit rule then drops mismatches.
-            # When the option is off, a plain iif rule accepts all sources.
-            _fwd_to_uplink_priority=$(( UPLINKMGR_FWD_TO_UPLINK_PRIORITY_START + _mv_idx ))
-            ip -6 rule del priority "$_fwd_to_uplink_priority" 2>/dev/null || true
-            if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
-                DELEGATED_PREFIX="${new_dhcp6_ia_pd1_prefix1:-}"
-                DELEGATED_LENGTH="${new_dhcp6_ia_pd1_prefix1_length:-}"
-                [ -n "$DELEGATED_PREFIX" ] && [ -n "$DELEGATED_LENGTH" ] || return 0
-                ip -6 rule add from "${DELEGATED_PREFIX}/${DELEGATED_LENGTH}" \
-                    iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
-                    priority "$_fwd_to_uplink_priority"
-                _prohibit_wrong_src_priority=$(( UPLINKMGR_PROHIBIT_WRONG_SRC_PRIORITY_START + _mv_idx ))
-                ip -6 rule del priority "$_prohibit_wrong_src_priority" 2>/dev/null || true
-                ip -6 rule add iif "$interface" prohibit \
-                    priority "$_prohibit_wrong_src_priority"
-            else
-                ip -6 rule add iif "$interface" lookup "$UPLINKMGR_TABLE_NUM" \
-                    priority "$_fwd_to_uplink_priority"
-            fi
+        if [ -n "$DELEGATED_PREFIX" ] && [ -n "$DELEGATED_LENGTH" ]; then
+            mkdir -p "$UPLINKMGR_STATE_DIR"
+            _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state" \
+                'delegated_prefix=%s\ndelegated_length=%s\nvltime=%s\npltime=%s\ntimestamp=%s\n' \
+                "$DELEGATED_PREFIX" "$DELEGATED_LENGTH" \
+                "$VLTIME" "$PLTIME" "$(date +%s)"
         fi
+
+        if [ -n "$new_ip6_address" ]; then
+            mkdir -p "$UPLINKMGR_STATE_DIR"
+            _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state" \
+                'address=%s\n' "$new_ip6_address"
+        fi
+
+        _signal_daemon
         ;;
 
-    # IPv6 expiry: WAN interface (remove source routing rule) + macvlan interfaces
+    # IPv6 expiry: remove all IPv6 state files and signal daemon
     EXPIRE6|STOP6)
-        if [ "$_is_wan" = true ] && [ "$UPLINKMGR_IPV6_PD" = true ]; then
-            ip -6 rule del priority "$UPLINKMGR_LO_TO_UPLINK_PRIORITY" 2>/dev/null || true
-            return 0
-        fi
-        [ "$_is_macvlan" = true ] || return 0
+        [ "$UPLINKMGR_IPV6_PD" = true ] || return 0
 
-        _mv_idx=$(macvlan_index_for_iface "$interface") || return 1
-        _internal_traffic_priority=$(( UPLINKMGR_INTERNAL_TRAFFIC_PRIORITY_START + _mv_idx ))
-        _fwd_to_uplink_priority=$(( UPLINKMGR_FWD_TO_UPLINK_PRIORITY_START + _mv_idx ))
-        ip -6 rule del priority "$_internal_traffic_priority" 2>/dev/null || true
-        ip -6 rule del priority "$_fwd_to_uplink_priority" 2>/dev/null || true
-        if [ "$UPLINKMGR_REJECT_INCOMPATIBLE_SRC" = true ]; then
-            _prohibit_wrong_src_priority=$(( UPLINKMGR_PROHIBIT_WRONG_SRC_PRIORITY_START + _mv_idx ))
-            ip -6 rule del priority "$_prohibit_wrong_src_priority" 2>/dev/null || true
-        fi
+        rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6gw.state"
+        rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
+        rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
+        _signal_daemon
         ;;
 
 esac

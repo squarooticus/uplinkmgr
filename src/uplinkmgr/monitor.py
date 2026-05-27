@@ -10,7 +10,7 @@ def probe_ipv4(wan_iface: str, hosts: Sequence[str]) -> bool:
     """Return True if any v4 host responds to ping via wan_iface."""
     for host in hosts:
         result = subprocess.run(
-            ["ping", "-c", "1", "-W", "2", "-I", wan_iface, host],
+            ["ping", "-c", "1", "-W", "2", "-n", "-q", "-I", wan_iface, host],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -23,7 +23,7 @@ def probe_ipv6(wan_iface: str, hosts: Sequence[str]) -> bool:
     """Return True if any v6 host responds to ping via wan_iface."""
     for host in hosts:
         result = subprocess.run(
-            ["ping6", "-c", "1", "-W", "2", "-I", wan_iface, host],
+            ["ping6", "-c", "1", "-W", "2", "-n", "-q", "-I", wan_iface, host],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

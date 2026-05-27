@@ -106,11 +106,12 @@ def load(path: str = DEFAULT_CONFIG_PATH) -> Config:
     if not uplinks:
         _die("at least one uplink must be defined")
 
-    table_end = routing_table_start + len(uplinks) - 1
+    # 1 shared IPv4 table + len(uplinks) IPv6 per-uplink tables
+    table_end = routing_table_start + len(uplinks)
     if table_end > 252:
         _die(
             f"routing_table_start={routing_table_start} with {len(uplinks)} uplinks "
-            f"would reach table {table_end}, exceeding 252"
+            f"would reach table {table_end} (1 IPv4 + {len(uplinks)} IPv6), exceeding 252"
         )
 
     return Config(
