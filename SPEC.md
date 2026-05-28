@@ -415,7 +415,7 @@ Actions:
    mkdir -p /run/uplinkmgr
    printf 'gateway=%s\nnd1_lifetime=%s\ntimestamp=%s\n' \
        "$GW6" "$ND1_LIFETIME" "$(date +%s)" \
-       > "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv6gw.state"
+       > "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state"
    ```
 
 3. Signal the daemon (best-effort; may not be running yet at boot):
@@ -477,7 +477,7 @@ Actions:
 
 1. Remove all IPv6 state files for this uplink:
    ```sh
-   rm -f "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv6gw.state"
+   rm -f "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state"
    rm -f "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
    rm -f "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
    ```
@@ -504,7 +504,7 @@ If the hook sources an env file and determines that `$interface` is the WAN inte
 The daemon monitors uplink health at regular intervals and manages all kernel routing state:
 - **IPv4 policy rules** (global, installed at startup): `lookup main suppress_prefixlength 0` and `lookup uplinkmgr`, which together provide policy-based routing via the shared uplinkmgr IPv4 table while preserving the main table as a fallback.
 - **IPv4 routes** in the shared `uplinkmgr` table: one default route per uplink with metric; the daemon adds/removes routes based on uplink health state.
-- **IPv6 routes** in per-uplink tables: one default route per IPv6 uplink (with expiry); installed on SIGUSR1 when the `ipv6gw.state` file is present, removed when absent.
+- **IPv6 routes** in per-uplink tables: one default route per IPv6 uplink (with expiry); installed on SIGUSR1 when the `ipv6ra.state` file is present, removed when absent.
 - **ip -6 rules**: all macvlan `internal_traffic`, `fwd_to_uplink`, `lo_to_uplink`, and (optionally) `prohibit_wrong_src` rules; installed on SIGUSR1 when state files are present, removed when absent.
 - **radvd configurations**: updating AdvDefaultPreference and prefix lifetimes based on IPv6 uplink state; restarted on SIGUSR1 (rate-limited) for lifetime refresh, SIGHUPed on health state changes for preference updates.
 
@@ -524,7 +524,7 @@ The daemon runs in the foreground; systemd handles daemonization.
 
 The daemon reads and writes:
 - `<uplink-name>.ipv4.state` — written by the hook on IPv4 BOUND/RENEW; one line: the IPv4 gateway address. Present when dhcpcd holds a valid IPv4 lease; absent on EXPIRE/RELEASE/STOP. The daemon reads this to determine the desired IPv4 gateway for the uplinkmgr table route.
-- `<uplink-name>.ipv6gw.state` — written by the hook on ROUTERADVERT (WAN interface); key=value lines: `gateway` (`$nd1_from`), `nd1_lifetime` (seconds, 0 if infinite), `timestamp` (Unix epoch). The daemon reads this to install/refresh the per-uplink IPv6 default route and to populate `AdvDefaultLifetime` and `AdvRouteLifetime`.
+- `<uplink-name>.ipv6ra.state` — written by the hook on ROUTERADVERT (WAN interface); key=value lines: `gateway` (`$nd1_from`), `nd1_lifetime` (seconds, 0 if infinite), `timestamp` (Unix epoch). The daemon reads this to install/refresh the per-uplink IPv6 default route and to populate `AdvDefaultLifetime` and `AdvRouteLifetime`.
 - `<uplink-name>.ipv6pd.state` — written by the hook on WAN BOUND6/RENEW6; key=value lines: `delegated_prefix`, `delegated_length`, `vltime`, `pltime`, `timestamp`. The daemon derives per-macvlan /64 prefixes from `delegated_prefix`/`delegated_length` using each network's SLA ID, installs macvlan ip -6 rules, and uses `vltime`/`pltime` to populate `AdvValidLifetime` and `AdvPreferredLifetime`.
 - `<uplink-name>.ipv6na.state` — written by the hook on WAN BOUND6/RENEW6 when `$new_ip6_address` is set; key=value line: `address`. The daemon reads this to install/update the `lo_to_uplink` ip -6 rule (`from <ia-na>/128 iif lo lookup <table>`).
 - `uplinkmgr.pid` — written by the daemon at startup; contains the daemon PID. The hook uses this to send SIGUSR1 when new state arrives.
@@ -617,7 +617,7 @@ The IPv6 probe binds to the WAN interface (`-I <wan-iface>`) and the kernel rout
 
 **IPv6 probe preconditions:** IPv6 probing is only performed when:
 1. `ipv6_pd: true` for the uplink, AND
-2. The per-uplink routing table contains an IPv6 default route (i.e., `ipv6gw.state` is present and the daemon has installed the route via reconcile).
+2. The per-uplink routing table contains an IPv6 default route (i.e., `ipv6ra.state` is present and the daemon has installed the route via reconcile).
 
 If the preconditions are not met, the IPv6 state for that uplink remains in its current state (not transitioned).
 
@@ -1255,7 +1255,7 @@ ping6 -c 1 -W 2 -I <wan-iface> <host>
 
 All hosts in `monitor.v6_hosts` are probed. Pass/fail logic is the same as IPv4.
 
-**Precondition for IPv6 probing:** `ipv6_pd: true` AND the per-uplink routing table contains an IPv6 default route (i.e., a `ipv6gw.state` file exists and the daemon has installed the route). The daemon checks for the route's presence via `ip -6 route show table <table_num>` before attempting probes.
+**Precondition for IPv6 probing:** `ipv6_pd: true` AND the per-uplink routing table contains an IPv6 default route (i.e., a `ipv6ra.state` file exists and the daemon has installed the route). The daemon checks for the route's presence via `ip -6 route show table <table_num>` before attempting probes.
 
 ### 10.4 Probe Execution
 
@@ -1341,7 +1341,7 @@ highest_priority_v6 = up_ipv6_uplinks[0] if up_ipv6_uplinks else None
 
 for uplink in ipv6_uplinks:
     # Router lifetime (from upstream RA)
-    gw_state = read_state(f"{uplink.name}.ipv6gw.state")
+    gw_state = read_state(f"{uplink.name}.ipv6ra.state")
     nd1_remaining = (
         max(0, gw_state.nd1_lifetime - (now - gw_state.timestamp))
         if gw_state else 1800  # conservative fallback
@@ -1384,7 +1384,7 @@ def _derive_prefix_info(pd_state, uplink, now):
 
 ### 11.6 AdvDefaultLifetime and AdvRouteLifetime
 
-Both `AdvDefaultLifetime` (the Router Lifetime field in the RA header) and `AdvRouteLifetime` (for the explicit `::/0` route block) are set to the **remaining `nd1_lifetime`** sourced from `<uplink-name>.ipv6gw.state`. This propagates the upstream router's validity window directly to clients.
+Both `AdvDefaultLifetime` (the Router Lifetime field in the RA header) and `AdvRouteLifetime` (for the explicit `::/0` route block) are set to the **remaining `nd1_lifetime`** sourced from `<uplink-name>.ipv6ra.state`. This propagates the upstream router's validity window directly to clients.
 
 `AdvDefaultLifetime` is **not** zeroed on downstate — the router remains reachable as a last resort. Only `AdvPreferredLifetime 0` is used to signal clients away from the failed uplink's prefix while preserving existing connections.
 

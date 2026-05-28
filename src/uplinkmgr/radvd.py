@@ -9,7 +9,7 @@ import time
 from typing import Optional
 
 from .config import Config, UplinkConfig
-from .state import IPv6GwState, IPv6PdState, read_ipv6gw_state, read_ipv6pd_state
+from .state import IPv6RaState, IPv6PdState, read_ipv6ra_state, read_ipv6pd_state
 from .statemachine import LinkState, UplinkState
 from . import naming, generator
 
@@ -54,11 +54,11 @@ def regenerate_all(
         pref = preference_for(uplink)
         is_down = states[uplink.name].ipv6 == LinkState.DOWN
 
-        gw_state: Optional[IPv6GwState] = read_ipv6gw_state(state_dir, uplink.name)
+        ra_state: Optional[IPv6RaState] = read_ipv6ra_state(state_dir, uplink.name)
         pd_state: Optional[IPv6PdState] = read_ipv6pd_state(state_dir, uplink.name)
 
-        if gw_state is not None:
-            default_lifetime = gw_state.remaining_lifetime(now)
+        if ra_state is not None:
+            default_lifetime = ra_state.remaining_lifetime(now)
             route_lifetime = default_lifetime
         else:
             default_lifetime = _FALLBACK_LIFETIME

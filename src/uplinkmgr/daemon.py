@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Config, UplinkConfig, load as load_config
-from .state import (IPv6PdState, read_ipv4_state, read_ipv6gw_state,
+from .state import (IPv6PdState, read_ipv4_state, read_ipv6ra_state,
                     read_ipv6pd_state, read_ipv6na_state)
 from . import monitor, naming, radvd, routing, state
 from .statemachine import LinkState, UplinkState, update as sm_update
@@ -199,7 +199,7 @@ class Daemon:
         for uplink in self._cfg.uplinks:
             if not uplink.ipv6_pd:
                 continue
-            gw = state.read_ipv6gw_state(self._state_dir, uplink.name)
+            gw = state.read_ipv6ra_state(self._state_dir, uplink.name)
             if gw is None or gw.nd1_lifetime == 0:
                 continue
             remaining = gw.remaining_lifetime(now)
@@ -308,15 +308,15 @@ class Daemon:
         now = int(time.time())
         installed = self._installed[uplink.name]
         ipv6_tbl = naming.table_num(cfg.routing_table_start, uplink.index)
-        ipv6gw_st = read_ipv6gw_state(self._state_dir, uplink.name)
+        ipv6ra_st = read_ipv6ra_state(self._state_dir, uplink.name)
         ipv6pd_st = read_ipv6pd_state(self._state_dir, uplink.name)
         ipv6na_st = read_ipv6na_state(self._state_dir, uplink.name)
 
         # IPv6 default route: always replace to refresh expiry
-        if ipv6gw_st is not None:
+        if ipv6ra_st is not None:
             routing.replace_ipv6_route(
-                ipv6gw_st.gateway, uplink.interface, ipv6_tbl,
-                ipv6gw_st.nd1_lifetime, ipv6gw_st.remaining_lifetime(now),
+                ipv6ra_st.gateway, uplink.interface, ipv6_tbl,
+                ipv6ra_st.nd1_lifetime, ipv6ra_st.remaining_lifetime(now),
             )
             installed.ipv6_route_installed = True
         elif installed.ipv6_route_installed:
@@ -329,8 +329,8 @@ class Daemon:
             uplink_addr = None
         elif ipv6na_st is not None:
             uplink_addr = ipv6na_st.address          # managed: DHCPv6 IA_NA
-        elif ipv6gw_st is not None and ipv6gw_st.address:
-            uplink_addr = ipv6gw_st.address          # unmanaged: SLAAC from RA
+        elif ipv6ra_st is not None and ipv6ra_st.address:
+            uplink_addr = ipv6ra_st.address          # unmanaged: SLAAC from RA
         else:
             uplink_addr = None
         if uplink_addr != installed.lo_to_uplink_addr:

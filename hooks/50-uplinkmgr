@@ -67,7 +67,7 @@ case "$reason" in
         esac
 
         mkdir -p "$UPLINKMGR_STATE_DIR"
-        _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6gw.state" \
+        _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state" \
             'gateway=%s\nnd1_lifetime=%s\ntimestamp=%s\naddress=%s\n' \
             "$GW6" "$ND1_LIFETIME" "$(date +%s)" "$SLAAC_ADDR"
 
@@ -106,7 +106,7 @@ case "$reason" in
     EXPIRE6|STOP6)
         [ "$UPLINKMGR_IPV6_PD" = true ] || return 0
 
-        rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6gw.state"
+        rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state"
         rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
         rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
         _signal_daemon

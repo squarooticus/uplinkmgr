@@ -14,7 +14,7 @@ class IPv4State:
 
 
 @dataclass
-class IPv6GwState:
+class IPv6RaState:
     gateway: str
     nd1_lifetime: int   # 0 means infinite
     timestamp: int      # Unix epoch when written
@@ -61,8 +61,8 @@ def read_ipv4_state(state_dir: str, uplink_name: str) -> Optional[IPv4State]:
         return None
 
 
-def read_ipv6gw_state(state_dir: str, uplink_name: str) -> Optional[IPv6GwState]:
-    path = Path(state_dir) / f"{uplink_name}.ipv6gw.state"
+def read_ipv6ra_state(state_dir: str, uplink_name: str) -> Optional[IPv6GwState]:
+    path = Path(state_dir) / f"{uplink_name}.ipv6ra.state"
     return _read_kv_state(path, IPv6GwState, {
         "gateway": str,
         "nd1_lifetime": int,
