@@ -199,10 +199,10 @@ class Daemon:
         for uplink in self._cfg.uplinks:
             if not uplink.ipv6_pd:
                 continue
-            gw = state.read_ipv6ra_state(self._state_dir, uplink.name)
-            if gw is None or gw.nd1_lifetime == 0:
+            ra_st = state.read_ipv6ra_state(self._state_dir, uplink.name)
+            if ra_st is None or ra_st.nd1_lifetime == 0:
                 continue
-            remaining = gw.remaining_lifetime(now)
+            remaining = ra_st.remaining_lifetime(now)
             if min_val is None or remaining < min_val:
                 min_val = remaining
         return min_val
@@ -282,22 +282,22 @@ class Daemon:
         cfg = self._cfg
         installed = self._installed[uplink.name]
         health = self._states[uplink.name]
-        ipv4_tbl = naming.ipv4_table_num(cfg.routing_table_start)
+        tbl = naming.ipv4_table_num(cfg.routing_table_start)
 
         ipv4_st = read_ipv4_state(self._state_dir, uplink.name)
-        desired_ipv4_gw = (
+        desired_gw = (
             ipv4_st.gateway
             if ipv4_st is not None and health.ipv4 == LinkState.UP
             else None
         )
-        if desired_ipv4_gw != installed.ipv4_installed:
-            if desired_ipv4_gw is not None:
+        if desired_gw != installed.ipv4_installed:
+            if desired_gw is not None:
                 routing.replace_ipv4_route(
-                    desired_ipv4_gw, uplink.interface, uplink.metric, ipv4_tbl,
+                    desired_gw, uplink.interface, uplink.metric, tbl,
                 )
             else:
-                routing.del_ipv4_route(uplink.interface, ipv4_tbl)
-            installed.ipv4_installed = desired_ipv4_gw
+                routing.del_ipv4_route(uplink.interface, tbl)
+            installed.ipv4_installed = desired_gw
 
     def _reconcile_uplink_ipv6(self, uplink: UplinkConfig) -> None:
         """Reconcile IPv6 route and rules in the per-uplink table for one uplink."""
@@ -307,30 +307,30 @@ class Daemon:
         cfg = self._cfg
         now = int(time.time())
         installed = self._installed[uplink.name]
-        ipv6_tbl = naming.table_num(cfg.routing_table_start, uplink.index)
-        ipv6ra_st = read_ipv6ra_state(self._state_dir, uplink.name)
-        ipv6pd_st = read_ipv6pd_state(self._state_dir, uplink.name)
-        ipv6na_st = read_ipv6na_state(self._state_dir, uplink.name)
+        tbl = naming.table_num(cfg.routing_table_start, uplink.index)
+        ra_st = read_ipv6ra_state(self._state_dir, uplink.name)
+        pd_st = read_ipv6pd_state(self._state_dir, uplink.name)
+        na_st = read_ipv6na_state(self._state_dir, uplink.name)
 
         # IPv6 default route: always replace to refresh expiry
-        if ipv6ra_st is not None:
+        if ra_st is not None:
             routing.replace_ipv6_route(
-                ipv6ra_st.gateway, uplink.interface, ipv6_tbl,
-                ipv6ra_st.nd1_lifetime, ipv6ra_st.remaining_lifetime(now),
+                ra_st.gateway, uplink.interface, tbl,
+                ra_st.nd1_lifetime, ra_st.remaining_lifetime(now),
             )
             installed.ipv6_route_installed = True
         elif installed.ipv6_route_installed:
-            routing.del_ipv6_route(uplink.interface, ipv6_tbl)
+            routing.del_ipv6_route(uplink.interface, tbl)
             installed.ipv6_route_installed = False
 
         # lo_to_uplink rule: present iff an uplink address is known AND health is UP
         health = self._states[uplink.name]
         if health.ipv6 != LinkState.UP:
             uplink_addr = None
-        elif ipv6na_st is not None:
-            uplink_addr = ipv6na_st.address          # managed: DHCPv6 IA_NA
-        elif ipv6ra_st is not None and ipv6ra_st.address:
-            uplink_addr = ipv6ra_st.address          # unmanaged: SLAAC from RA
+        elif na_st is not None:
+            uplink_addr = na_st.address          # managed: DHCPv6 IA_NA
+        elif ra_st is not None and ra_st.address:
+            uplink_addr = ra_st.address          # unmanaged: SLAAC from RA
         else:
             uplink_addr = None
         if uplink_addr != installed.lo_to_uplink_addr:
@@ -340,14 +340,14 @@ class Daemon:
                 )
             if uplink_addr is not None:
                 routing.add_lo_to_uplink_rule(
-                    uplink_addr, ipv6_tbl,
+                    uplink_addr, tbl,
                     naming.lo_to_uplink_priority(cfg, uplink.index),
                 )
             installed.lo_to_uplink_addr = uplink_addr
 
-        # Per-macvlan rules: driven by ipv6pd_st presence
-        if ipv6pd_st is not None:
-            self._reconcile_macvlan_rules(uplink, ipv6pd_st, ipv6_tbl, installed)
+        # Per-macvlan rules: driven by pd_st presence
+        if pd_st is not None:
+            self._reconcile_macvlan_rules(uplink, pd_st, tbl, installed)
         else:
             self._teardown_macvlan_rules(uplink, installed)
 
