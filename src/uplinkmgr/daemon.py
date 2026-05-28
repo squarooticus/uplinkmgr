@@ -323,24 +323,27 @@ class Daemon:
             routing.del_ipv6_route(uplink.interface, ipv6_tbl)
             installed.ipv6_route_installed = False
 
-        # lo_to_uplink rule: present iff state file exists AND health is UP
+        # lo_to_uplink rule: present iff an uplink address is known AND health is UP
         health = self._states[uplink.name]
-        desired_na_addr = (
-            ipv6na_st.address
-            if ipv6na_st is not None and health.ipv6 == LinkState.UP
-            else None
-        )
-        if desired_na_addr != installed.lo_to_uplink_addr:
+        if health.ipv6 != LinkState.UP:
+            uplink_addr = None
+        elif ipv6na_st is not None:
+            uplink_addr = ipv6na_st.address          # managed: DHCPv6 IA_NA
+        elif ipv6gw_st is not None and ipv6gw_st.address:
+            uplink_addr = ipv6gw_st.address          # unmanaged: SLAAC from RA
+        else:
+            uplink_addr = None
+        if uplink_addr != installed.lo_to_uplink_addr:
             if installed.lo_to_uplink_addr is not None:
                 routing.del_ipv6_rule(
                     naming.lo_to_uplink_priority(cfg, uplink.index)
                 )
-            if desired_na_addr is not None:
+            if uplink_addr is not None:
                 routing.add_lo_to_uplink_rule(
-                    desired_na_addr, ipv6_tbl,
+                    uplink_addr, ipv6_tbl,
                     naming.lo_to_uplink_priority(cfg, uplink.index),
                 )
-            installed.lo_to_uplink_addr = desired_na_addr
+            installed.lo_to_uplink_addr = uplink_addr
 
         # Per-macvlan rules: driven by ipv6pd_st presence
         if ipv6pd_st is not None:

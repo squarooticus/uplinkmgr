@@ -18,6 +18,7 @@ class IPv6GwState:
     gateway: str
     nd1_lifetime: int   # 0 means infinite
     timestamp: int      # Unix epoch when written
+    address: str = ""   # SLAAC address (unmanaged network) or "" (managed/DHCPv6)
 
     def remaining_lifetime(self, now: Optional[int] = None) -> int:
         if self.nd1_lifetime == 0:
@@ -66,7 +67,8 @@ def read_ipv6gw_state(state_dir: str, uplink_name: str) -> Optional[IPv6GwState]
         "gateway": str,
         "nd1_lifetime": int,
         "timestamp": int,
-    })
+        "address": str,
+    }, defaults={"address": ""})
 
 
 def read_ipv6na_state(state_dir: str, uplink_name: str) -> Optional[IPv6NaState]:
@@ -85,7 +87,8 @@ def read_ipv6pd_state(state_dir: str, uplink_name: str) -> Optional[IPv6PdState]
     })
 
 
-def _read_kv_state(path: Path, cls, field_types: dict):
+def _read_kv_state(path: Path, cls, field_types: dict,
+                   defaults: Optional[dict] = None):
     try:
         text = path.read_text()
     except OSError:
@@ -97,7 +100,14 @@ def _read_kv_state(path: Path, cls, field_types: dict):
             k, _, v = line.partition("=")
             kv[k.strip()] = v.strip()
     try:
-        kwargs = {k: field_types[k](kv[k]) for k in field_types}
+        kwargs = {}
+        for k, t in field_types.items():
+            if k in kv:
+                kwargs[k] = t(kv[k])
+            elif defaults is not None and k in defaults:
+                kwargs[k] = defaults[k]
+            else:
+                raise KeyError(k)
         return cls(**kwargs)
     except (KeyError, ValueError):
         return None

@@ -59,10 +59,17 @@ case "$reason" in
 
         [ -n "$GW6" ] || return 0
 
+        # M flag: DHCPv6 assigns addresses; address comes from IA_NA (ipv6na.state).
+        # No M flag: SLAAC; address is the kernel-assigned EUI64 address from the RA prefix.
+        case "$nd1_flags" in
+            *M*) SLAAC_ADDR="" ;;
+            *)   SLAAC_ADDR="${nd1_addr1:-}" ;;
+        esac
+
         mkdir -p "$UPLINKMGR_STATE_DIR"
         _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6gw.state" \
-            'gateway=%s\nnd1_lifetime=%s\ntimestamp=%s\n' \
-            "$GW6" "$ND1_LIFETIME" "$(date +%s)"
+            'gateway=%s\nnd1_lifetime=%s\ntimestamp=%s\naddress=%s\n' \
+            "$GW6" "$ND1_LIFETIME" "$(date +%s)" "$SLAAC_ADDR"
 
         _signal_daemon
         ;;
@@ -88,6 +95,8 @@ case "$reason" in
             mkdir -p "$UPLINKMGR_STATE_DIR"
             _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state" \
                 'address=%s\n' "$new_ip6_address"
+        else
+            rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
         fi
 
         _signal_daemon
