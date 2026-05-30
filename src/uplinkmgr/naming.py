@@ -66,9 +66,6 @@ def ipv6_table_name(uplink_name: str) -> str:
     return f"uplinkmgr_{uplink_name}"
 
 
-def dhcpcd_unit_name(uplink_name: str) -> str:
-    return f"dhcpcd-uplinkmgr-{uplink_name}.service"
-
 
 def radvd_conf_path(uplink_name: str) -> str:
     return f"/etc/radvd/radvd-uplinkmgr-{uplink_name}.conf"
