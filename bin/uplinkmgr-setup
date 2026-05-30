@@ -197,7 +197,7 @@ def _backup_dhcpcd_conf(dry_run: bool) -> None:
 
 def _remove_stale(cfg, current_uplink_names: set[str]) -> None:
     generator.remove_stale_files(
-        "/etc/radvd", "radvd-uplinkmgr-", current_uplink_names, ".conf"
+        "/etc/uplinkmgr/radvd", "radvd-uplinkmgr-", current_uplink_names, ".conf"
     )
     # Remove stale env files and their symlinks
     import os

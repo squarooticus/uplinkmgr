@@ -68,7 +68,7 @@ def ipv6_table_name(uplink_name: str) -> str:
 
 
 def radvd_conf_path(uplink_name: str) -> str:
-    return f"/etc/radvd/radvd-uplinkmgr-{uplink_name}.conf"
+    return f"/etc/uplinkmgr/radvd/radvd-uplinkmgr-{uplink_name}.conf"
 
 
 def radvd_template_unit_name() -> str:
