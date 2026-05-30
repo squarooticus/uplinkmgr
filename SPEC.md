@@ -202,6 +202,7 @@ uplinkmgr:
     v6_hosts:                   # list of IPv6 addresses to probe
       - 2001:4860:4860::8888
       - 2606:4700:4700::1111
+    ping_count: 3               # sequential ping -c 1 attempts per host; succeed if any pass (integer, default: 3)
 
   networks:                     # internal LAN interfaces, in config-file order
     - name: home                # logical name (used in log messages and comments only)
@@ -223,7 +224,7 @@ uplinkmgr:
 ### 4.3 Field Constraints
 
 - `routing_table_start`: Must be in the range 1–252 (default: 160). Avoid the well-known reserved IDs: 0=unspec, 253=default, 254=main, 255=local. Values above 255 are also valid kernel table numbers, but the default keeps table IDs in the single-byte range for readability in `ip route show table all` output. The range `[routing_table_start, routing_table_start + len(uplinks)]` (1 IPv4 table + one per uplink for IPv6) must not overlap with any table numbers already in `/etc/iproute2/rt_tables` or `/etc/iproute2/rt_tables.d/`.
-- `rule_priority_start`: Must leave room for all ip -6 rules (see §7.5). With `reject_incompatible_src` off the count is `2 * len(uplinks) * len(networks) + len(uplinks)`; with it on the count is `len(uplinks) * (3 * len(networks) + 1)`. The range is documented as `[rule_priority_start, rule_priority_start + 99]`.
+- `rule_priority_start`: Must leave room for all policy rules (see §7.5). Let `N = len(uplinks) * len(networks)`. IPv4 rules: `len(uplinks) + 2` (suppress + lo_to_uplink per uplink + fwd_to_wan). IPv6 rules: `1 + N + len(uplinks)` without `reject_incompatible_src`, `1 + 2*N + len(uplinks)` with it. Total with `reject_incompatible_src` on: `3 + 2*len(uplinks) + 2*N`. The configured range `[rule_priority_start, rule_priority_start + 99]` must not overlap any existing rules.
 - `uplink.name`: Must consist only of alphanumeric characters and hyphens; must be unique across all uplinks.
 - `network.interface` and `uplink.interface`: Must be valid Linux interface names (max 15 chars). They are **not** validated against live interface existence by `uplinkmgr-setup` (the system may be configured before interfaces exist).
 - `uplink.metric`: If specified, must be a positive integer. If omitted, defaults to `100 * (uplink_index + 1)`.
@@ -365,11 +366,13 @@ Triggered when: `$reason` is one of `BOUND`, `RENEW`, `REBIND`, `REBOOT` and `$i
 Actions:
 
 1. Extract the first gateway from `$routers` as `GW4`.
-2. Write the gateway to the state file:
+2. Write the gateway and WAN address to the state file (key=value format):
    ```sh
    mkdir -p /run/uplinkmgr
-   printf '%s\n' "$GW4" > "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv4.state"
+   printf 'gateway=%s\naddress=%s\n' "$GW4" "${new_ip_address:-}" \
+       > "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv4.state"
    ```
+   The `address=` field is the WAN IP assigned by dhcpcd (`$new_ip_address`); the daemon uses it for the IPv4 `lo_to_uplink` rule (§7.5).
 3. Signal the daemon:
    ```sh
    if [ -f /run/uplinkmgr/uplinkmgr.pid ]; then
@@ -400,23 +403,31 @@ Actions:
 
 Triggered when: `$reason` is `ROUTERADVERT` and `$interface` matches the WAN interface.
 
-This event fires when dhcpcd receives a Router Advertisement on the WAN interface, providing the upstream IPv6 default gateway. Confirmed variable names (dhcpcd 10.x): `$nd1_from` (RA source address / gateway), `$nd1_lifetime` (router lifetime in seconds).
+This event fires when dhcpcd receives a Router Advertisement on the WAN interface. Confirmed variable names (dhcpcd 10.x): `$nd1_from` (RA source address / gateway), `$nd1_lifetime` (router lifetime in seconds), `$nd1_flags` (RA flag characters: `M` = managed, `O` = other), `$nd1_addr1` (first SLAAC address assigned from the RA prefix), `$nd1_prefix_information1_prefix` (RA prefix address), `$nd1_prefix_information1_length` (RA prefix length).
 
 Actions:
 
-1. Extract the gateway and router lifetime:
+1. Extract gateway, lifetime, prefix, and SLAAC address (if unmanaged):
    ```sh
    GW6="$nd1_from"
-   ND1_LIFETIME="$nd1_lifetime"
+   ND1_LIFETIME="${nd1_lifetime:-0}"
+   ND1_PREFIX="${nd1_prefix_information1_prefix:-}"
+   ND1_PLEN="${nd1_prefix_information1_length:-0}"
+   # M flag: managed (DHCPv6 IA_NA); no M flag: SLAAC
+   case "$nd1_flags" in
+       *M*) SLAAC_ADDR="" ;;
+       *)   SLAAC_ADDR="${nd1_addr1:-}" ;;
+   esac
    ```
 
-2. Write the IPv6 gateway state file:
+2. Write the IPv6 RA state file (key=value format):
    ```sh
    mkdir -p /run/uplinkmgr
-   printf 'gateway=%s\nnd1_lifetime=%s\ntimestamp=%s\n' \
-       "$GW6" "$ND1_LIFETIME" "$(date +%s)" \
+   printf 'gateway=%s\nlifetime=%s\ntimestamp=%s\naddress=%s\nprefix=%s\nplen=%s\n' \
+       "$GW6" "$ND1_LIFETIME" "$(date +%s)" "$SLAAC_ADDR" "$ND1_PREFIX" "$ND1_PLEN" \
        > "/run/uplinkmgr/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state"
    ```
+   `address=` is set only for unmanaged (SLAAC) networks; empty for managed networks. `prefix=` and `plen=` are set for all RAs.
 
 3. Signal the daemon (best-effort; may not be running yet at boot):
    ```sh
@@ -502,10 +513,12 @@ If the hook sources an env file and determines that `$interface` is the WAN inte
 #### 5.3.1 Purpose
 
 The daemon monitors uplink health at regular intervals and manages all kernel routing state:
-- **IPv4 policy rules** (global, installed at startup): `lookup main suppress_prefixlength 0` and `lookup uplinkmgr`, which together provide policy-based routing via the shared uplinkmgr IPv4 table while preserving the main table as a fallback.
-- **IPv4 routes** in the shared `uplinkmgr` table: one default route per uplink with metric; the daemon adds/removes routes based on uplink health state.
+- **IPv4 global policy rules** (installed at startup): `lookup main suppress_prefixlength 0` and `lookup uplinkmgr`; together these route traffic via the shared uplinkmgr IPv4 table while preserving the main table for local/connected routes.
+- **IPv6 global policy rule** (installed at startup): `ip -6 rule add lookup main suppress_prefixlength 0`; covers all IPv6 traffic so internal destinations are routed via the main table before per-uplink rules apply.
+- **IPv4 routes** in the shared `uplinkmgr` table: one default route per uplink with metric. Also a default route in each per-uplink table (metric 0) for use by the `lo_to_uplink` rule.
+- **IPv4 `lo_to_uplink` rules**: per-uplink `ip rule add from <wan-ip> lookup <per-uplink-table>`; routes router-originated traffic bound to a specific WAN IP via the correct uplink.
 - **IPv6 routes** in per-uplink tables: one default route per IPv6 uplink (with expiry); installed on SIGUSR1 when the `ipv6ra.state` file is present, removed when absent.
-- **ip -6 rules**: all macvlan `internal_traffic`, `fwd_to_uplink`, `lo_to_uplink`, and (optionally) `prohibit_wrong_src` rules; installed on SIGUSR1 when state files are present, removed when absent.
+- **ip -6 rules**: per-macvlan `fwd_to_uplink`, per-uplink `lo_to_uplink`, and (optionally) `prohibit_wrong_src` rules; installed/removed as state files appear/disappear.
 - **radvd configurations**: updating AdvDefaultPreference and prefix lifetimes based on IPv6 uplink state; restarted on SIGUSR1 (rate-limited) for lifetime refresh, SIGHUPed on health state changes for preference updates.
 
 The hook is responsible only for writing state files and signalling the daemon. All routing and rule management is centralized in the daemon, eliminating race conditions between the hook and daemon.
@@ -523,22 +536,32 @@ The daemon runs in the foreground; systemd handles daemonization.
 `/run/uplinkmgr/` (created as `RuntimeDirectory=uplinkmgr` in the systemd unit, or by `uplinkmgr-setup` if run outside systemd).
 
 The daemon reads and writes:
-- `<uplink-name>.ipv4.state` — written by the hook on IPv4 BOUND/RENEW; one line: the IPv4 gateway address. Present when dhcpcd holds a valid IPv4 lease; absent on EXPIRE/RELEASE/STOP. The daemon reads this to determine the desired IPv4 gateway for the uplinkmgr table route.
-- `<uplink-name>.ipv6ra.state` — written by the hook on ROUTERADVERT (WAN interface); key=value lines: `gateway` (`$nd1_from`), `nd1_lifetime` (seconds, 0 if infinite), `timestamp` (Unix epoch). The daemon reads this to install/refresh the per-uplink IPv6 default route and to populate `AdvDefaultLifetime` and `AdvRouteLifetime`.
+- `<uplink-name>.ipv4.state` — written by the hook on IPv4 BOUND/RENEW; key=value lines: `gateway` (IPv4 default gateway), `address` (WAN IP assigned by dhcpcd). Present when dhcpcd holds a valid IPv4 lease; absent on EXPIRE/RELEASE/STOP. The daemon reads this to determine the IPv4 gateway for the uplinkmgr table route and the WAN IP for the IPv4 `lo_to_uplink` rule.
+- `<uplink-name>.ipv6ra.state` — written by the hook on ROUTERADVERT (WAN interface); key=value lines: `gateway` (`$nd1_from`), `lifetime` (seconds, 0 if infinite), `timestamp` (Unix epoch), `address` (SLAAC address if unmanaged, else empty), `prefix` (RA prefix address), `plen` (RA prefix length). The daemon reads this to install/refresh the per-uplink IPv6 default route and to populate `AdvDefaultLifetime` and `AdvRouteLifetime`.
 - `<uplink-name>.ipv6pd.state` — written by the hook on WAN BOUND6/RENEW6; key=value lines: `delegated_prefix`, `delegated_length`, `vltime`, `pltime`, `timestamp`. The daemon derives per-macvlan /64 prefixes from `delegated_prefix`/`delegated_length` using each network's SLA ID, installs macvlan ip -6 rules, and uses `vltime`/`pltime` to populate `AdvValidLifetime` and `AdvPreferredLifetime`.
-- `<uplink-name>.ipv6na.state` — written by the hook on WAN BOUND6/RENEW6 when `$new_ip6_address` is set; key=value line: `address`. The daemon reads this to install/update the `lo_to_uplink` ip -6 rule (`from <ia-na>/128 iif lo lookup <table>`).
+- `<uplink-name>.ipv6na.state` — written by the hook on WAN BOUND6/RENEW6 when `$new_ip6_address` is set; key=value line: `address`. The daemon reads this for managed networks to install the `lo_to_uplink` ip -6 rule (`from <ia-na>/128 iif lo lookup <table>`). For unmanaged (SLAAC) networks the rule uses the RA prefix/plen from `ipv6ra.state` instead.
 - `uplinkmgr.pid` — written by the daemon at startup; contains the daemon PID. The hook uses this to send SIGUSR1 when new state arrives.
 
 #### 5.3.4 IPv4 Route Management
 
 The daemon manages IPv4 routing via a **shared `uplinkmgr` routing table** (number: `routing_table_start`) and two global policy rules.
 
-**Policy rules (installed at daemon startup, removed at shutdown):**
+**Global policy rules (installed at daemon startup, removed at shutdown):**
 ```sh
-ip rule add lookup main suppress_prefixlength 0 priority <suppress_priority>
-ip rule add lookup uplinkmgr priority <lookup_priority>
+# IPv4
+ip rule add lookup main suppress_prefixlength 0 priority <ipv4_internal_traffic_priority>
+ip rule add lookup uplinkmgr priority <ipv4_fwd_to_wan_priority>
+# IPv6
+ip -6 rule add lookup main suppress_prefixlength 0 priority <ipv6_internal_traffic_priority>
 ```
-These rules apply to all traffic (not interface-specific). `suppress_prefixlength 0` causes the first rule to match only non-default routes in the main table (connected/local routes), allowing inter-VLAN and local traffic to use the main table normally. The second rule selects the default route from the uplinkmgr table by metric. The kernel's default `lookup main` rule (priority 32767) is preserved as fallback — when the daemon is not running, traffic uses dhcpcd's main-table routes.
+The suppress rules cause traffic to route via connected/local routes in the main table (inter-VLAN, local) before the per-uplink rules apply; when only a default route would match, it is suppressed and the packet falls through to the next rule. The `lookup uplinkmgr` rule selects the IPv4 default route by metric. The kernel's `lookup main` rule (priority 32767) is preserved as fallback when the daemon is not running.
+
+**Per-uplink IPv4 `lo_to_uplink` rules** (reconciled from `ipv4.state`):
+```sh
+ip rule add from <wan_ip> lookup <per_uplink_table> priority <ipv4_lo_to_uplink_priority>
+ip route replace default via <GW4> dev <wan_iface> metric 0 table <per_uplink_table>
+```
+The per-uplink table default route (metric 0, present whenever the shared-table route is present) is what the lo_to_uplink rule resolves to. This ensures router-originated traffic bound to a specific WAN IP exits via the correct uplink rather than the highest-metric uplink.
 
 **Routes in the uplinkmgr table (reconciled on SIGUSR1 and on health state changes):**
 
@@ -581,7 +604,7 @@ On each SIGUSR1, the daemon checks two conditions:
 
 If either condition is true, radvd is restarted and `_last_radvd_restart` is updated. Otherwise the config files are written (so they stay accurate for the next restart or SIGHUP), but radvd is not restarted, and a debug-level log message records the skip.
 
-Uplinks with `nd1_lifetime = 0` (infinite router lifetime) are excluded from the lifetime urgency check.
+Uplinks with `lifetime = 0` in `ipv6ra.state` (infinite router lifetime) are excluded from the lifetime urgency check.
 
 #### 5.3.6 Main Loop
 
@@ -601,17 +624,17 @@ The probe and state update for each uplink are independent — an uplink's IPv4 
 
 **IPv4 probe:**
 ```sh
-ping -c 1 -W 2 -I <wan-iface> <host>
+ping -c 1 -W 2 -n -q -I <wan-iface> <host>
 ```
-Run for each host in `monitor.v4_hosts`. The probe passes if **any** host responds. The probe fails if **all** hosts fail or time out.
+Run for each host in `monitor.v4_hosts`. For each host, up to `monitor.ping_count` (default 3) sequential `ping -c 1` attempts are made; the first success short-circuits. The overall probe passes if **any** host/attempt succeeds. `-n` suppresses DNS lookups; `-q` suppresses per-packet output.
 
-The probe is run using the uplinkmgr policy routing rules (the WAN interface is specified by `-I`, and the kernel's `lookup uplinkmgr` rule selects the default route via the uplinkmgr table). If the daemon's policy rules are not yet installed (e.g., very early at boot), the probe falls through to the main table's dhcpcd-installed routes.
+The probe is bound to the WAN interface (`-I`); the kernel's `lookup uplinkmgr` rule selects the default route via the uplinkmgr table. If the daemon's policy rules are not yet installed, the probe falls through to the main table's dhcpcd-installed routes.
 
 **IPv6 probe:**
 ```sh
-ping6 -c 1 -W 2 -I <wan-iface> <host>
+ping6 -c 1 -W 2 -n -q -I <wan-iface> <host>
 ```
-Run for each host in `monitor.v6_hosts`. Same pass/fail logic.
+Run for each host in `monitor.v6_hosts`. Same pass/fail logic and `ping_count` retry semantics.
 
 The IPv6 probe binds to the WAN interface (`-I <wan-iface>`) and the kernel routes the packet via the per-uplink routing table (the `lo_to_uplink` rule or the WAN-interface-bound source routes the packet through the uplink's IPv6 table).
 
@@ -628,7 +651,7 @@ On startup, the daemon:
 1. Reads the config file.
 2. Initializes all uplink states to `UP` (optimistic start — routes are assumed present).
 3. Writes the PID file (`/run/uplinkmgr/uplinkmgr.pid`).
-4. Installs the two global IPv4 policy rules (`lookup main suppress_prefixlength 0` and `lookup uplinkmgr`).
+4. Installs the global IPv4 policy rules (`lookup main suppress_prefixlength 0` and `lookup uplinkmgr`) and the global IPv6 policy rule (`ip -6 rule add lookup main suppress_prefixlength 0`).
 5. Performs an initial reconcile pass over all state files: installs IPv4 and IPv6 routes and all ip -6 rules that correspond to existing state files.
 6. Begins the monitoring loop immediately (no delay).
 
@@ -743,9 +766,9 @@ Written to `/etc/radvd/radvd-uplinkmgr-<name>.conf`. One file per IPv6 uplink, i
 
 The daemon regenerates these files at runtime (see §11). The format must be identical between `uplinkmgr-setup` and the daemon — they use the same generation logic.
 
-**Lifetime values are sourced from state files, never hardcoded.** The daemon reads `nd1_lifetime`, `vltime`, and `pltime` from the state files written by the dhcpcd hook and computes remaining lifetimes (`max(0, value - elapsed)`). These are written into the config so that when radvd starts (or restarts), it begins counting down from the correct remaining value. On SIGHUP, radvd ignores the new lifetime values in the config and continues its internal counters — so SIGHUP is only used for preference-tier changes; a full restart is used when lifetimes need refreshing (see §5.3.5).
+**Lifetime values are sourced from state files, never hardcoded.** The daemon reads `lifetime` (from `ipv6ra.state`), `vltime`, and `pltime` (from `ipv6pd.state`) and computes remaining lifetimes (`max(0, value - elapsed)`). These are written into the config so that when radvd starts (or restarts), it begins counting down from the correct remaining value. On SIGHUP, radvd ignores the new lifetime values in the config and continues its internal counters — so SIGHUP is only used for preference-tier changes; a full restart is used when lifetimes need refreshing (see §5.3.5).
 
-Example runtime config for uplink `comcast` (index 0, highest priority, IPv6 UP), with delegated prefix `2001:db8:aaaa::/56`, nd1_lifetime=1800, vltime=86400, pltime=14400, written 300 seconds after delegation:
+Example runtime config for uplink `comcast` (index 0, highest priority, IPv6 UP), with delegated prefix `2001:db8:aaaa::/56`, upstream RA lifetime=1800, vltime=86400, pltime=14400, written 300 seconds after delegation:
 
 ```
 # Generated by uplinkmgr daemon for uplink: comcast
@@ -755,12 +778,12 @@ interface vlan10-u0
 {
     AdvSendAdvert on;
     AdvDefaultPreference high;
-    AdvDefaultLifetime 1500;        # remaining nd1_lifetime: 1800 - 300
+    AdvDefaultLifetime 1500;        # remaining lifetime: 1800 - 300
 
     route ::/0
     {
         AdvRoutePreference high;
-        AdvRouteLifetime 1500;      # remaining nd1_lifetime: 1800 - 300
+        AdvRouteLifetime 1500;      # remaining lifetime: 1800 - 300
     };
 
     prefix 2001:db8:aaaa::/64
@@ -812,8 +835,8 @@ interface vlan20-u0
 
 | Uplink state | AdvDefaultPreference | AdvRoutePreference | AdvPreferredLifetime | AdvValidLifetime | AdvDefaultLifetime / AdvRouteLifetime |
 |-------------|---------------------|-------------------|---------------------|-----------------|--------------------------------------|
-| IPv6 UP | `high` or `medium` | `high` or `medium` | remaining pltime from state file | remaining vltime from state file | remaining nd1_lifetime from state file |
-| IPv6 DOWN | `low` | `low` | 0 | 1800 | remaining nd1_lifetime from state file |
+| IPv6 UP | `high` or `medium` | `high` or `medium` | remaining pltime from state file | remaining vltime from state file | remaining lifetime from ipv6ra.state |
+| IPv6 DOWN | `low` | `low` | 0 | 1800 | remaining lifetime from ipv6ra.state |
 
 ("Remaining" values are `max(0, value - elapsed)` at the time the config is written; for freshly renewed leases this is approximately the full value.)
 
@@ -833,8 +856,8 @@ Written to `/etc/systemd/system/radvd-uplinkmgr-<name>.service`. One file per IP
 
 [Unit]
 Description=Router advertisement daemon for uplinkmgr uplink: comcast
-After=network.target dhcpcd-uplinkmgr-comcast.service
-Requires=dhcpcd-uplinkmgr-comcast.service
+After=network.target dhcpcd.service
+Requires=dhcpcd.service
 
 [Service]
 Type=forking
@@ -1010,58 +1033,47 @@ This must be set before the interface is brought up, which is why it appears in 
 
 ### 7.5 Rule Priorities
 
-All policy routing rules are installed and removed by the **daemon** (not the hook). The daemon installs rules only when the corresponding state files are present and removes them when absent or at shutdown.
+All policy routing rules are installed and removed by the **daemon** (not the hook). Global rules are installed at startup and removed at shutdown; per-uplink/per-macvlan rules are installed/removed as state files appear/disappear.
 
-**IPv4 global policy rules** (two rules, installed at daemon startup):
-- `rule_priority_start`: `ip rule add lookup main suppress_prefixlength 0 priority <rule_priority_start>`
-- `rule_priority_start + 1`: `ip rule add lookup uplinkmgr priority <rule_priority_start + 1>`
+Let `N = len(uplinks) * len(networks)`, `M = len(networks)`.
 
-**ip -6 rules** are assigned from `rule_priority_start + 2` upward in four groups. Let `N = len(uplinks) * len(networks)`.
+**IPv4 rules** (`ip rule` — separate priority namespace from `ip -6 rule`):
 
-**`internal_traffic` — macvlan suppress rules** (always present when IPv6 PD state is active):
-`rule_priority_start + 2 + uplink_idx * len(networks) + net_idx`
-Rule: `iif <macvlan> lookup main suppress_prefixlength 0`
-Sends inter-VLAN traffic through the main table (connected routes); lets internet-bound traffic fall through when only the default route matches.
+- `rule_priority_start + 0` (`ipv4_internal_traffic`): `lookup main suppress_prefixlength 0` — global; installed at startup.
+- `rule_priority_start + 1 + uplink_idx` (`ipv4_lo_to_uplink`): `from <wan_ip> lookup <per_uplink_table>` — per uplink; installed when `ipv4.state` is present and uplink is UP.
+- `rule_priority_start + 1 + len(uplinks)` (`ipv4_fwd_to_wan`): `lookup uplinkmgr` — global; installed at startup.
 
-**`fwd_to_uplink` — macvlan lookup rules** (forwarded traffic from internal clients):
-`rule_priority_start + 2 + N + uplink_idx * len(networks) + net_idx`
-- `reject_incompatible_src` off: `iif <macvlan> lookup <table>`
-- `reject_incompatible_src` on: `from <delegated-prefix>/<len> iif <macvlan> lookup <table>`
+**IPv6 rules** (`ip -6 rule` — separate priority namespace from IPv4):
 
-**`lo_to_uplink` — WAN `from iif lo` rules** (locally-generated traffic on the router itself):
-`rule_priority_start + 2 + 2*N + uplink_idx`
-Rule: `from <ia-na>/128 iif lo lookup <table>`
-`iif lo` restricts the rule to locally-originated packets only. Installed only when `ipv6na.state` is present.
+- `rule_priority_start + 0` (`ipv6_internal_traffic`): `lookup main suppress_prefixlength 0` — **single global rule**; installed at startup; replaces the old per-macvlan suppress rules.
+- `rule_priority_start + 1 + uplink_idx * M + net_idx` (`ipv6_fwd_to_uplink`): per macvlan; `reject_incompatible_src` off: `iif <macvlan> lookup <table>`; on: `from <delegated-prefix>/<len> iif <macvlan> lookup <table>`.
+- `rule_priority_start + 1 + N + uplink_idx` (`ipv6_lo_to_uplink`): `from <prefix> iif lo lookup <table>`. For managed networks: `from <ia_na_addr>/128`; for SLAAC networks: `from <ra_prefix>/<ra_plen>` (covers all kernel-assigned addresses from the RA prefix, including privacy addresses). Installed when state is known and uplink is UP.
+- `rule_priority_start + 1 + N + len(uplinks) + uplink_idx * M + net_idx` (`ipv6_prohibit_wrong_src`): `iif <macvlan> prohibit` — only when `reject_incompatible_src: true`.
 
-**`prohibit_wrong_src` — macvlan prohibit catch-alls** (only when `reject_incompatible_src` is on):
-`rule_priority_start + 2 + 2*N + len(uplinks) + uplink_idx * len(networks) + net_idx`
-Rule: `iif <macvlan> prohibit`
+Example with 2 uplinks (`comcast`=0, `starlink`=1), 2 networks, `reject_incompatible_src: true`, `rule_priority_start`=29000 (N=4, M=2):
 
-Example with 2 uplinks (`comcast`=0, `starlink`=1), 2 internal interfaces, `reject_incompatible_src` on, `rule_priority_start`=29000:
+```
+# ip rule show (IPv4)
+29000:  from all lookup main suppress_prefixlength 0         (ipv4_internal_traffic)
+29001:  from <comcast-wan-ip> lookup 161                     (ipv4_lo_to_uplink, comcast)
+29002:  from <starlink-wan-ip> lookup 162                    (ipv4_lo_to_uplink, starlink)
+29003:  from all lookup 160                                  (ipv4_fwd_to_wan)
 
-IPv4 rules (global, always present while daemon runs):
-- Priority 29000: `lookup main suppress_prefixlength 0`  (ipv4_suppress)
-- Priority 29001: `lookup uplinkmgr`  (ipv4_lookup)
+# ip -6 rule show (IPv6)
+29000:  from all lookup main suppress_prefixlength 0         (ipv6_internal_traffic, global)
+29001:  from <comcast-pd>/48 iif vlan10-u0 lookup 161        (ipv6_fwd_to_uplink)
+29002:  from <comcast-pd>/48 iif vlan20-u0 lookup 161
+29003:  from <starlink-pd>/48 iif vlan10-u1 lookup 162
+29004:  from <starlink-pd>/48 iif vlan20-u1 lookup 162
+29005:  from <comcast-ia-na>/128 iif lo lookup 161           (ipv6_lo_to_uplink, managed)
+29006:  from <starlink-prefix>/64 iif lo lookup 162          (ipv6_lo_to_uplink, SLAAC)
+29007:  iif vlan10-u0 prohibit                               (ipv6_prohibit_wrong_src)
+29008:  iif vlan20-u0 prohibit
+29009:  iif vlan10-u1 prohibit
+29010:  iif vlan20-u1 prohibit
+```
 
-IPv6 rules (present when IPv6 state files exist):
-- Priority 29002: `iif vlan10-u0 lookup main suppress_prefixlength 0`  (internal_traffic)
-- Priority 29003: `iif vlan20-u0 lookup main suppress_prefixlength 0`
-- Priority 29004: `iif vlan10-u1 lookup main suppress_prefixlength 0`
-- Priority 29005: `iif vlan20-u1 lookup main suppress_prefixlength 0`
-- Priority 29006: `from <comcast-delegated>/60 iif vlan10-u0 lookup uplinkmgr_comcast`  (fwd_to_uplink)
-- Priority 29007: `from <comcast-delegated>/60 iif vlan20-u0 lookup uplinkmgr_comcast`
-- Priority 29008: `from <starlink-delegated>/60 iif vlan10-u1 lookup uplinkmgr_starlink`
-- Priority 29009: `from <starlink-delegated>/60 iif vlan20-u1 lookup uplinkmgr_starlink`
-- Priority 29010: `from <comcast-ia-na>/128 iif lo lookup uplinkmgr_comcast`  (lo_to_uplink)
-- Priority 29011: `from <starlink-ia-na>/128 iif lo lookup uplinkmgr_starlink`
-- Priority 29012: `iif vlan10-u0 prohibit`  (prohibit_wrong_src)
-- Priority 29013: `iif vlan20-u0 prohibit`
-- Priority 29014: `iif vlan10-u1 prohibit`
-- Priority 29015: `iif vlan20-u1 prohibit`
-
-The configured range `[rule_priority_start, rule_priority_start + 99]` supports up to 100 rules total (IPv4 + IPv6). With `reject_incompatible_src` on, the IPv6 count is `N*3 + len(uplinks)` = `len(uplinks) * (3*len(networks) + 1)`, plus 2 IPv4 rules. E.g., 5 uplinks × 4 networks = 65 IPv6 rules + 2 IPv4 = 67 total.
-
-**Rule update semantics:** `ip rule del` + `ip rule add` is **not atomic** — a brief window exists where no rule is present. The daemon avoids unnecessary del+add by tracking installed rule parameters and only reinstalling when parameters change. `lo_to_uplink` rules are reinstalled if the IA_NA address changes (new ia-na address from a new lease); other rule types have stable parameters once installed.
+**Rule update semantics:** `ip rule del` + `ip rule add` is **not atomic** — a brief window exists where no rule is present. The daemon avoids unnecessary del+add by tracking installed rule parameters and only reinstalling when parameters change. `lo_to_uplink` rules are reinstalled if the uplink address/prefix changes.
 
 ### 7.6 SLA IDs for IPv6 PD
 
@@ -1091,16 +1103,24 @@ The daemon installs two global policy rules and a default route per uplink in th
 
 ```
 # ip rule show (relevant entries)
-29000:  lookup main suppress_prefixlength 0
-29001:  lookup uplinkmgr
+29000:  lookup main suppress_prefixlength 0         # ipv4_internal_traffic
+29001:  from 203.0.113.10 lookup 161                # ipv4_lo_to_uplink (comcast wan ip)
+29002:  from 198.51.100.50 lookup 162               # ipv4_lo_to_uplink (starlink wan ip)
+29003:  lookup uplinkmgr                            # ipv4_fwd_to_wan
 32767:  lookup main (kernel default, always present)
 
-# ip route show table uplinkmgr
+# ip route show table uplinkmgr (table 160)
 default via 192.168.1.1 dev eth0 metric 100    # comcast
 default via 10.0.0.1    dev eth1 metric 200    # starlink
+
+# ip -4 route show table 161 (comcast per-uplink)
+default via 192.168.1.1 dev eth0               # for lo_to_uplink use
+
+# ip -4 route show table 162 (starlink per-uplink)
+default via 10.0.0.1 dev eth1
 ```
 
-All IPv4 traffic (from internal interfaces, NATed via nftables masquerade) is directed by the `lookup uplinkmgr` rule and exits through `eth0` (comcast, metric 100). Inter-VLAN and local traffic matches the `suppress_prefixlength 0` rule via the main table's connected routes.
+All IPv4 traffic (from internal interfaces, NATed via nftables masquerade) is directed by the `lookup uplinkmgr` rule and exits through `eth0` (comcast, metric 100). Inter-VLAN and local traffic matches the `suppress_prefixlength 0` rule via the main table's connected routes. Router-originated traffic using comcast's WAN IP is directed by the `lo_to_uplink` rule to table 161 and exits via `eth0`.
 
 dhcpcd also installs default routes in the main table (with the configured metrics) as a fallback. These are not used while the daemon's policy rules are active.
 
@@ -1259,9 +1279,9 @@ All hosts in `monitor.v6_hosts` are probed. Pass/fail logic is the same as IPv4.
 
 ### 10.4 Probe Execution
 
-The daemon uses Python's `subprocess` module to run ping commands. Each probe has a timeout matching `-W <value>` plus a small buffer (0.5s) to handle OS overhead. If the subprocess exceeds this timeout, it is killed and the probe is counted as a failure.
+The daemon uses Python's `subprocess` module to run ping commands directly; the `-W 2` timeout is enforced by ping itself.
 
-The daemon runs all probes for all uplinks in a single cycle before sleeping. Probes for different uplinks run sequentially (not in parallel) to simplify error handling, though this may be optimized in a future version.
+Probes for different uplinks run **in parallel** using a `ThreadPoolExecutor` (one thread per uplink). Within each uplink's thread, IPv4 and IPv6 probes and their `ping_count` retry loops are sequential. All uplink threads are submitted at once; the daemon waits for all to complete before processing results and updating state machines. This bounds the cycle time to the slowest single uplink's probe sequence rather than the sum of all uplinks'.
 
 ---
 
@@ -1343,7 +1363,7 @@ for uplink in ipv6_uplinks:
     # Router lifetime (from upstream RA)
     gw_state = read_state(f"{uplink.name}.ipv6ra.state")
     nd1_remaining = (
-        max(0, gw_state.nd1_lifetime - (now - gw_state.timestamp))
+        max(0, gw_state.lifetime - (now - gw_state.timestamp))
         if gw_state else 1800  # conservative fallback
     )
 
@@ -1384,7 +1404,7 @@ def _derive_prefix_info(pd_state, uplink, now):
 
 ### 11.6 AdvDefaultLifetime and AdvRouteLifetime
 
-Both `AdvDefaultLifetime` (the Router Lifetime field in the RA header) and `AdvRouteLifetime` (for the explicit `::/0` route block) are set to the **remaining `nd1_lifetime`** sourced from `<uplink-name>.ipv6ra.state`. This propagates the upstream router's validity window directly to clients.
+Both `AdvDefaultLifetime` (the Router Lifetime field in the RA header) and `AdvRouteLifetime` (for the explicit `::/0` route block) are set to the **remaining `lifetime`** from `<uplink-name>.ipv6ra.state`. This propagates the upstream router's validity window directly to clients.
 
 `AdvDefaultLifetime` is **not** zeroed on downstate — the router remains reachable as a last resort. Only `AdvPreferredLifetime 0` is used to signal clients away from the failed uplink's prefix while preserving existing connections.
 
@@ -1400,15 +1420,15 @@ Debian 13's `network-online.target` (and systemd's `wait-online` logic) will cau
 
 1. **ifupdown runs** (`/etc/init.d/networking start` or `networking.service`): Brings up all `auto` interfaces, including macvlan interfaces defined in `/etc/network/interfaces.d/uplinkmgr.conf`.
 
-2. **`dhcpcd-uplinkmgr-<name>.service` units start** for each uplink (ordered by systemd based on `After=` dependencies). Each unit runs a persistent dhcpcd instance that:
-   - Obtains an IPv4 lease on the WAN interface.
-   - Adds the default route to the main table with the configured metric (dhcpcd's own behavior; serves as boot-time fallback).
-   - Runs the dhcpcd hook, which writes state files and signals the daemon.
-   - (If `ipv6_pd: true`) Requests prefix delegation and sub-delegates to macvlan interfaces.
+2. **`dhcpcd.service` starts** (the single system dhcpcd instance; config managed by `uplinkmgr-setup`). dhcpcd manages all uplink WAN interfaces and macvlan interfaces simultaneously:
+   - Obtains IPv4 leases on each WAN interface.
+   - Adds default routes to the main table with the configured metrics (dhcpcd's own behavior; serves as boot-time fallback).
+   - Runs the dhcpcd hook for each event, which writes state files and signals the daemon.
+   - (For `ipv6_pd: true` uplinks) Requests prefix delegation and sub-delegates to macvlan interfaces.
 
-3. **`radvd-uplinkmgr-<name>.service` units start** (after their corresponding dhcpcd units). radvd begins advertising prefixes on macvlan interfaces.
+3. **`radvd-uplinkmgr-<name>.service` units start** (each depends on `dhcpcd.service`). radvd begins advertising prefixes on macvlan interfaces.
 
-4. **`uplinkmgr.service` starts** (after all dhcpcd units, per `Before=uplinkmgr.service` in dhcpcd unit files). The daemon begins monitoring. At this point, routes are already configured; the daemon's initial state is `UP` for all uplinks.
+4. **`uplinkmgr.service` starts** (depends on `dhcpcd.service`). The daemon begins monitoring. At this point, routes are already configured; the daemon's initial state is `UP` for all uplinks.
 
 **Result:** IPv4 connectivity is available as soon as any dhcpcd instance obtains a lease (step 2), long before the daemon starts. Debian's boot does not time out waiting for the network.
 
@@ -1440,9 +1460,12 @@ When the daemon receives SIGTERM (or is stopped by `systemctl stop uplinkmgr`):
 
 1. **Remove all installed routes and rules:**
    - Remove all IPv4 routes from the `uplinkmgr` table (one per uplink where a route was installed).
-   - Remove all IPv6 default routes from per-uplink tables.
-   - Remove all ip -6 rules (internal_traffic, fwd_to_uplink, lo_to_uplink, prohibit_wrong_src).
+   - Remove all IPv4 default routes from per-uplink tables (used by `lo_to_uplink` rules).
+   - Remove all IPv4 `lo_to_uplink` rules.
    - Remove the two global IPv4 policy rules (`suppress_prefixlength 0` and `lookup uplinkmgr`).
+   - Remove all IPv6 default routes from per-uplink tables.
+   - Remove all ip -6 rules (`fwd_to_uplink`, `lo_to_uplink`, optionally `prohibit_wrong_src`).
+   - Remove the global IPv6 policy rule (`lookup main suppress_prefixlength 0`).
 
 2. **Regenerate all radvd configs to "everything up" state:** Regenerate all radvd config files as if all IPv6 uplinks are UP. Assign preference tiers by uplink priority (index 0 = high, others = medium). Write all configs atomically.
 
@@ -1569,14 +1592,16 @@ Module structure:
 ```
 /usr/lib/python3/dist-packages/uplinkmgr/
     __init__.py
-    config.py      # YAML config parsing and validation
-    naming.py      # Naming convention utilities (shared by daemon and setup)
-    generator.py   # Config file generation (used by uplinkmgr-setup and daemon)
-    daemon.py      # Main daemon loop
-    monitor.py     # Probe logic
+    config.py       # YAML config parsing and validation
+    naming.py       # Naming convention utilities (macvlan names, table numbers, paths)
+    priority.py     # ip rule priority allocation for all rule types
+    generator.py    # Config file generation (used by uplinkmgr-setup and daemon)
+    daemon.py       # Main daemon loop
+    monitor.py      # Probe logic
     statemachine.py # Uplink state machine
-    routing.py     # ip route/rule manipulation
-    radvd.py       # radvd config generation and SIGHUP
+    routing.py      # ip route/rule manipulation
+    radvd.py        # radvd config generation and SIGHUP
+    state.py        # State file reading (IPv4State, IPv6RaState, etc.)
 ```
 
 `/usr/sbin/uplinkmgr` and `/usr/sbin/uplinkmgr-setup` are thin entry-point scripts.
@@ -1694,7 +1719,7 @@ However:
 1. **DHCP-only WAN:** Only DHCP WAN uplinks are supported. PPPoE and static WAN configurations are out of scope.
 2. **IPv6 PD only:** IPv6 is only provisioned if the WAN provides prefix delegation. Uplinks with `ipv6_pd: false` are IPv4-only; there is no fallback to SLAAC-from-WAN or static IPv6.
 3. **Single delegated prefix per uplink:** The design assumes one prefix delegation per uplink. If an ISP provides multiple prefixes, only the first is used.
-4. **No probe parallelism:** Probes are run sequentially. With many uplinks and many probe hosts, a single monitoring cycle could take longer than `monitor.interval`. The implementation should log a warning if a cycle takes longer than the interval.
+4. **Within-uplink probe sequencing:** Probes for different uplinks run in parallel (one thread per uplink). Within a single uplink's thread, IPv4 and IPv6 probes are sequential. With many probe hosts or a high `ping_count`, a cycle for one uplink could take longer than `monitor.interval`. The daemon logs a warning if any cycle exceeds the interval.
 5. **radvd `prefix ::/64` fallback:** The initial radvd config (generated by `uplinkmgr-setup`) uses `prefix ::/64` as a placeholder until the first PD is received. If radvd cannot derive the delegated prefix automatically from the macvlan interface's assigned address, clients will not receive a useful prefix until the daemon regenerates the config after the first SIGUSR1 from the hook. This is a boot-time-only window.
 6. **Restart gap on lifetime refresh:** When the daemon restarts a radvd instance to apply fresh lifetimes (on SIGUSR1), there is a brief window (typically < 1 second) during which radvd is not sending RAs. Clients will not notice a gap this short. There is also a sub-second race between the daemon computing remaining lifetimes and radvd starting its countdown from those values, meaning advertised lifetimes may be very slightly longer than the upstream values.
 7. **Asymmetric uplink indices after config change:** If an uplink is removed from the middle of the `uplinks:` list, all subsequent uplinks' indices, MACs, link-locals, and routing table numbers change. This requires a full re-run of `uplinkmgr-setup`, restart of all affected services, and the administrator should be warned that existing client addresses become stale.
@@ -1716,7 +1741,7 @@ The following items require verification against upstream documentation or testi
 | # | Component | Item | Where to Verify |
 |---|-----------|------|----------------|
 | 1 | dhcpcd hook | ~~Exact variable names for IPv6 PD prefix, vltime, and pltime~~ **Confirmed:** PD variables are on the **WAN interface** BOUND6/RENEW6 event (not macvlan events): `$dhcp6_ia_pd1_prefix1`, `$dhcp6_ia_pd1_prefix1_length`, `$dhcp6_ia_pd1_prefix1_vltime`, `$dhcp6_ia_pd1_prefix1_pltime`. Delegated prefix length may be less than 64 (e.g. /60). | — |
-| 2 | dhcpcd hook | ~~Variable holding the RA source address and router lifetime for `ROUTERADVERT` events~~ **Confirmed:** `$nd1_from` (gateway / RA source address), `$nd1_lifetime` (router lifetime in seconds). | — |
+| 2 | dhcpcd hook | ~~Variable holding the RA source address and router lifetime for `ROUTERADVERT` events~~ **Confirmed:** `$nd1_from` (gateway / RA source address), `$nd1_lifetime` (router lifetime in seconds; note the state file key is `lifetime=`, not `nd1_lifetime=`). Also confirmed: `$nd1_flags` (flag characters including `M` for managed), `$nd1_addr1` (first SLAAC address), `$nd1_prefix_information1_prefix` (RA prefix address), `$nd1_prefix_information1_length` (RA prefix length). | — |
 | 3 | dhcpcd config | ~~`ia_pd` directive syntax~~ **Confirmed:** `ia_pd <IAID>/<requested-prefix>/<hint-length> <iface>/<SLA-ID>/64 ...` — e.g., `ia_pd 2/::/56 vlan10-u0/0/64 vlan20-u0/1/64`. `ia_na <IAID>` is also required to obtain an IPv6 address on the WAN interface. `ipv6rs` is needed to trigger ROUTERADVERT events. `duid` ensures consistent lease assignment. | — |
 | 4 | dhcpcd config | ~~`allowinterfaces` directive~~ **Confirmed:** `allowinterfaces` is correct in dhcpcd 10.x. Note: starting with dhcpcd 11, multi-instance support is expected to be removed in favor of a single-instance "manager mode"; this will require redesign if a future Debian target ships dhcpcd 11+. Out of scope for this spec (targets dhcpcd 10.1). | — |
 | 5 | dhcpcd binary | ~~Correct path on Debian 13 (Trixie)~~ **Confirmed:** `/usr/sbin/dhcpcd`. | — |
