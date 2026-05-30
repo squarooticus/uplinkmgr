@@ -108,17 +108,18 @@ def main() -> None:
     tail = _read_optional_file("/etc/uplinkmgr/dhcpcd.conf.tail")
     generator.write_file("/etc/dhcpcd.conf", generator.dhcpcd_conf(cfg, head=head, tail=tail), dry_run)
 
-    # --- per-uplink radvd files ---
+    # --- radvd template unit and per-uplink config files ---
+    if any(u.ipv6_pd for u in cfg.uplinks):
+        generator.write_file(
+            f"/etc/systemd/system/{naming.radvd_template_unit_name()}",
+            generator.radvd_template_unit(),
+            dry_run,
+        )
     for uplink in cfg.uplinks:
         if uplink.ipv6_pd:
             generator.write_file(
                 naming.radvd_conf_path(uplink.name),
                 generator.radvd_conf(cfg, uplink),
-                dry_run,
-            )
-            generator.write_file(
-                f"/etc/systemd/system/{naming.radvd_unit_name(uplink.name)}",
-                generator.radvd_unit(cfg, uplink),
                 dry_run,
             )
 
@@ -197,9 +198,6 @@ def _backup_dhcpcd_conf(dry_run: bool) -> None:
 def _remove_stale(cfg, current_uplink_names: set[str]) -> None:
     generator.remove_stale_files(
         "/etc/radvd", "radvd-uplinkmgr-", current_uplink_names, ".conf"
-    )
-    generator.remove_stale_files(
-        "/etc/systemd/system", "radvd-uplinkmgr-", current_uplink_names, ".service"
     )
     # Remove stale env files and their symlinks
     import os
