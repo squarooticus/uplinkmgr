@@ -27,9 +27,10 @@ _MISSING = object()  # sentinel for "never installed" in macvlan_fwd dict
 @dataclass
 class _UplinkRouting:
     """Tracks routing elements installed by the daemon for one uplink."""
-    ipv4_installed: Optional[str] = None         # installed IPv4 gateway, or None
-    ipv6_route_installed: bool = False            # per-uplink IPv6 default route present
-    lo_to_uplink_addr: Optional[str] = None      # from-addr in lo_to_uplink rule
+    ipv4_installed: Optional[str] = None              # installed IPv4 gateway, or None
+    ipv4_lo_to_uplink_addr: Optional[str] = None      # from-addr in IPv4 lo_to_uplink rule
+    ipv6_route_installed: bool = False                 # per-uplink IPv6 default route present
+    lo_to_uplink_addr: Optional[str] = None           # from-addr in IPv6 lo_to_uplink rule
     macvlan_internal: set[str] = field(default_factory=set)
     macvlan_fwd: dict[str, Optional[str]] = field(default_factory=dict)  # mv -> prefix or None
     macvlan_prohibit: set[str] = field(default_factory=set)
@@ -278,11 +279,11 @@ class Daemon:
             self._reconcile_uplink_ipv6(uplink)
 
     def _reconcile_uplink_ipv4(self, uplink: UplinkConfig) -> None:
-        """Reconcile IPv4 route in the uplinkmgr table for one uplink."""
+        """Reconcile IPv4 routes and rules for one uplink."""
         cfg = self._cfg
         installed = self._installed[uplink.name]
         health = self._states[uplink.name]
-        tbl = naming.ipv4_table_num(cfg.routing_table_start)
+        shared_tbl = naming.ipv4_table_num(cfg.routing_table_start)
 
         ipv4_st = read_ipv4_state(self._state_dir, uplink.name)
         desired_gw = (
@@ -293,11 +294,34 @@ class Daemon:
         if desired_gw != installed.ipv4_installed:
             if desired_gw is not None:
                 routing.replace_ipv4_route(
-                    desired_gw, uplink.interface, uplink.metric, tbl,
+                    desired_gw, uplink.interface, uplink.metric, shared_tbl,
                 )
             else:
-                routing.del_ipv4_route(uplink.interface, tbl)
+                routing.del_ipv4_route(uplink.interface, shared_tbl)
             installed.ipv4_installed = desired_gw
+
+        # lo_to_uplink rule: route router-originated traffic via the correct uplink
+        per_uplink_tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
+        desired_lo_addr = (
+            ipv4_st.address
+            if ipv4_st is not None and ipv4_st.address and health.ipv4 == LinkState.UP
+            else None
+        )
+        if desired_lo_addr != installed.ipv4_lo_to_uplink_addr:
+            if installed.ipv4_lo_to_uplink_addr is not None:
+                routing.del_ipv4_rule(
+                    priority.ipv4_lo_to_uplink_priority(cfg, uplink.index)
+                )
+                routing.del_ipv4_route(uplink.interface, per_uplink_tbl)
+            if desired_lo_addr is not None:
+                routing.replace_ipv4_route(
+                    desired_gw, uplink.interface, 0, per_uplink_tbl,
+                )
+                routing.add_ipv4_lo_to_uplink_rule(
+                    desired_lo_addr, per_uplink_tbl,
+                    priority.ipv4_lo_to_uplink_priority(cfg, uplink.index),
+                )
+            installed.ipv4_lo_to_uplink_addr = desired_lo_addr
 
     def _reconcile_uplink_ipv6(self, uplink: UplinkConfig) -> None:
         """Reconcile IPv6 route and rules in the per-uplink table for one uplink."""
@@ -418,10 +442,18 @@ class Daemon:
                 routing.del_ipv4_route(uplink.interface, ipv4_tbl)
                 installed.ipv4_installed = None
 
+            per_uplink_tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
+            if installed.ipv4_lo_to_uplink_addr is not None:
+                routing.del_ipv4_rule(
+                    priority.ipv4_lo_to_uplink_priority(cfg, uplink.index)
+                )
+                routing.del_ipv4_route(uplink.interface, per_uplink_tbl)
+                installed.ipv4_lo_to_uplink_addr = None
+
             if not uplink.ipv6_pd:
                 continue
 
-            ipv6_tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
+            ipv6_tbl = per_uplink_tbl
 
             if installed.ipv6_route_installed:
                 routing.del_ipv6_route(uplink.interface, ipv6_tbl)

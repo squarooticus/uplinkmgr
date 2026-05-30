@@ -91,6 +91,12 @@ def add_ipv6_prohibit_wrong_src_rule(mv: str, priority: int) -> None:
           "iif", mv, "prohibit", "priority", str(priority)])
 
 
+def add_ipv4_lo_to_uplink_rule(addr: str, table: int, priority: int) -> None:
+    _run(["ip", "rule", "add",
+          "from", addr,
+          "lookup", str(table), "priority", str(priority)])
+
+
 def del_ipv4_rule(priority: int) -> None:
     _run_del(["ip", "rule", "del", "priority", str(priority)])
 

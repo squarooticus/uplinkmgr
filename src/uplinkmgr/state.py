@@ -11,6 +11,7 @@ from typing import Optional
 @dataclass
 class IPv4State:
     gateway: str
+    address: str   # WAN IP assigned by dhcpcd
 
 
 @dataclass
@@ -54,11 +55,7 @@ class IPv6PdState:
 
 def read_ipv4_state(state_dir: str, uplink_name: str) -> Optional[IPv4State]:
     path = Path(state_dir) / f"{uplink_name}.ipv4.state"
-    try:
-        gw = path.read_text().strip()
-        return IPv4State(gateway=gw) if gw else None
-    except OSError:
-        return None
+    return _read_kv_state(path, IPv4State, {"gateway": str, "address": str})
 
 
 def read_ipv6ra_state(state_dir: str, uplink_name: str) -> Optional[IPv6GwState]:

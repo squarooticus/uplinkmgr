@@ -41,7 +41,7 @@ case "$reason" in
 
         mkdir -p "$UPLINKMGR_STATE_DIR"
         _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv4.state" \
-            '%s\n' "$GW4"
+            'gateway=%s\naddress=%s\n' "$GW4" "${new_ip_address:-}"
         _signal_daemon
         ;;
 
