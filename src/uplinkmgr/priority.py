@@ -11,12 +11,12 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # IPv4 rule priorities  (ip rule — separate namespace from IPv6)
 #
-# rule_priority_start + 0              ipv4_suppress_priority
-# rule_priority_start + 1 + idx        ipv4_lo_to_uplink_priority  (per uplink)
-# rule_priority_start + 1 + n_uplinks  ipv4_lookup_priority
+# rule_priority_start + 0              ipv4_internal_traffic_priority  (global)
+# rule_priority_start + 1 + idx        ipv4_lo_to_uplink_priority      (per uplink)
+# rule_priority_start + 1 + n_uplinks  ipv4_fwd_to_wan_priority        (global)
 # ---------------------------------------------------------------------------
 
-def ipv4_suppress_priority(cfg: "Config") -> int:
+def ipv4_internal_traffic_priority(cfg: "Config") -> int:
     return cfg.rule_priority_start
 
 
@@ -24,7 +24,7 @@ def ipv4_lo_to_uplink_priority(cfg: "Config", uplink_idx: int) -> int:
     return cfg.rule_priority_start + 1 + uplink_idx
 
 
-def ipv4_lookup_priority(cfg: "Config") -> int:
+def ipv4_fwd_to_wan_priority(cfg: "Config") -> int:
     return cfg.rule_priority_start + 1 + len(cfg.uplinks)
 
 

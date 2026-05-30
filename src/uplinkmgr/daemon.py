@@ -287,8 +287,8 @@ class Daemon:
     def _setup_ipv4_rules(self) -> None:
         cfg = self._cfg
         routing.add_ipv4_policy_rules(
-            suppress_priority=priority.ipv4_suppress_priority(cfg),
-            lookup_priority=priority.ipv4_lookup_priority(cfg),
+            internal_traffic_priority=priority.ipv4_internal_traffic_priority(cfg),
+            fwd_to_wan_priority=priority.ipv4_fwd_to_wan_priority(cfg),
             ipv4_table=naming.ipv4_table_num(cfg.routing_table_start),
         )
         self._ipv4_rules_installed = True
@@ -304,44 +304,42 @@ class Daemon:
         installed = self._installed[uplink.name]
         health = self._states[uplink.name]
         shared_tbl = naming.ipv4_table_num(cfg.routing_table_start)
+        per_uplink_tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
 
         ipv4_st = read_ipv4_state(self._state_dir, uplink.name)
-        desired_gw = (
+        uplink_gw = (
             ipv4_st.gateway
             if ipv4_st is not None and health.ipv4 == LinkState.UP
             else None
         )
-        if desired_gw != installed.ipv4_installed:
-            if desired_gw is not None:
-                routing.replace_ipv4_route(
-                    desired_gw, uplink.interface, uplink.metric, shared_tbl,
-                )
+
+        # Shared + per-uplink default routes: always in sync, independent of address
+        if uplink_gw != installed.ipv4_installed:
+            if uplink_gw is not None:
+                routing.replace_ipv4_route(uplink_gw, uplink.interface, uplink.metric, shared_tbl)
+                routing.replace_ipv4_route(uplink_gw, uplink.interface, 0, per_uplink_tbl)
             else:
                 routing.del_ipv4_route(uplink.interface, shared_tbl)
-            installed.ipv4_installed = desired_gw
+                routing.del_ipv4_route(uplink.interface, per_uplink_tbl)
+            installed.ipv4_installed = uplink_gw
 
-        # lo_to_uplink rule: route router-originated traffic via the correct uplink
-        per_uplink_tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
-        desired_lo_addr = (
+        # lo_to_uplink rule: keyed on address, not gateway
+        uplink_addr = (
             ipv4_st.address
             if ipv4_st is not None and ipv4_st.address and health.ipv4 == LinkState.UP
             else None
         )
-        if desired_lo_addr != installed.ipv4_lo_to_uplink_addr:
+        if uplink_addr != installed.ipv4_lo_to_uplink_addr:
             if installed.ipv4_lo_to_uplink_addr is not None:
                 routing.del_ipv4_rule(
                     priority.ipv4_lo_to_uplink_priority(cfg, uplink.index)
                 )
-                routing.del_ipv4_route(uplink.interface, per_uplink_tbl)
-            if desired_lo_addr is not None:
-                routing.replace_ipv4_route(
-                    desired_gw, uplink.interface, 0, per_uplink_tbl,
-                )
+            if uplink_addr is not None:
                 routing.add_ipv4_lo_to_uplink_rule(
-                    desired_lo_addr, per_uplink_tbl,
+                    uplink_addr, per_uplink_tbl,
                     priority.ipv4_lo_to_uplink_priority(cfg, uplink.index),
                 )
-            installed.ipv4_lo_to_uplink_addr = desired_lo_addr
+            installed.ipv4_lo_to_uplink_addr = uplink_addr
 
     def _reconcile_uplink_ipv6(self, uplink: UplinkConfig) -> None:
         """Reconcile IPv6 route and rules in the per-uplink table for one uplink."""
@@ -465,16 +463,16 @@ class Daemon:
         for uplink in cfg.uplinks:
             installed = self._installed[uplink.name]
 
+            per_uplink_tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
             if installed.ipv4_installed is not None:
                 routing.del_ipv4_route(uplink.interface, ipv4_tbl)
+                routing.del_ipv4_route(uplink.interface, per_uplink_tbl)
                 installed.ipv4_installed = None
 
-            per_uplink_tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
             if installed.ipv4_lo_to_uplink_addr is not None:
                 routing.del_ipv4_rule(
                     priority.ipv4_lo_to_uplink_priority(cfg, uplink.index)
                 )
-                routing.del_ipv4_route(uplink.interface, per_uplink_tbl)
                 installed.ipv4_lo_to_uplink_addr = None
 
             if not uplink.ipv6_pd:
@@ -499,8 +497,8 @@ class Daemon:
 
         if self._ipv4_rules_installed:
             routing.del_ipv4_policy_rules(
-                suppress_priority=priority.ipv4_suppress_priority(cfg),
-                lookup_priority=priority.ipv4_lookup_priority(cfg),
+                internal_traffic_priority=priority.ipv4_internal_traffic_priority(cfg),
+                fwd_to_wan_priority=priority.ipv4_fwd_to_wan_priority(cfg),
             )
             self._ipv4_rules_installed = False
 

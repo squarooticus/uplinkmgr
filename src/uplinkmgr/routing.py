@@ -13,19 +13,19 @@ log = logging.getLogger(__name__)
 # IPv4 policy rules (global — installed at daemon startup, removed on stop)
 # ---------------------------------------------------------------------------
 
-def add_ipv4_policy_rules(suppress_priority: int, lookup_priority: int,
+def add_ipv4_policy_rules(internal_traffic_priority: int, fwd_to_wan_priority: int,
                            ipv4_table: int) -> None:
     _run(["ip", "rule", "add",
           "lookup", "main", "suppress_prefixlength", "0",
-          "priority", str(suppress_priority)])
+          "priority", str(internal_traffic_priority)])
     _run(["ip", "rule", "add",
           "lookup", str(ipv4_table),
-          "priority", str(lookup_priority)])
+          "priority", str(fwd_to_wan_priority)])
 
 
-def del_ipv4_policy_rules(suppress_priority: int, lookup_priority: int) -> None:
-    _run_del(["ip", "rule", "del", "priority", str(suppress_priority)])
-    _run_del(["ip", "rule", "del", "priority", str(lookup_priority)])
+def del_ipv4_policy_rules(internal_traffic_priority: int, fwd_to_wan_priority: int) -> None:
+    _run_del(["ip", "rule", "del", "priority", str(internal_traffic_priority)])
+    _run_del(["ip", "rule", "del", "priority", str(fwd_to_wan_priority)])
 
 
 # ---------------------------------------------------------------------------
