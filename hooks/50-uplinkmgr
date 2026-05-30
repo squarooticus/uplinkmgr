@@ -70,7 +70,7 @@ case "$reason" in
 
         mkdir -p "$UPLINKMGR_STATE_DIR"
         _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state" \
-            'gateway=%s\nnd1_lifetime=%s\ntimestamp=%s\naddress=%s\nprefix=%s\nplen=%s\n' \
+            'gateway=%s\nlifetime=%s\ntimestamp=%s\naddress=%s\nprefix=%s\nplen=%s\n' \
             "$GW6" "$ND1_LIFETIME" "$(date +%s)" "$SLAAC_ADDR" "$ND1_PREFIX" "$ND1_PLEN"
 
         _signal_daemon

@@ -198,7 +198,7 @@ class Daemon:
     def _min_gw_remaining(self) -> Optional[int]:
         """Return the minimum remaining upstream RA lifetime across all IPv6 uplinks.
 
-        Returns None when all uplinks have infinite lifetime (nd1_lifetime=0) or no state.
+        Returns None when all uplinks have infinite lifetime (lifetime=0) or no state.
         """
         now = int(time.time())
         min_val: Optional[int] = None
@@ -206,7 +206,7 @@ class Daemon:
             if not uplink.ipv6_pd:
                 continue
             ra_st = state.read_ipv6ra_state(self._state_dir, uplink.name)
-            if ra_st is None or ra_st.nd1_lifetime == 0:
+            if ra_st is None or ra_st.lifetime == 0:
                 continue
             remaining = ra_st.remaining_lifetime(now)
             if min_val is None or remaining < min_val:
@@ -366,7 +366,7 @@ class Daemon:
         if ra_st is not None:
             routing.replace_ipv6_route(
                 ra_st.gateway, uplink.interface, tbl,
-                ra_st.nd1_lifetime, ra_st.remaining_lifetime(now),
+                ra_st.lifetime, ra_st.remaining_lifetime(now),
             )
             installed.ipv6_route_installed = True
         elif installed.ipv6_route_installed:

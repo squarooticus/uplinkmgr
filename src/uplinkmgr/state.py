@@ -17,18 +17,18 @@ class IPv4State:
 @dataclass
 class IPv6RaState:
     gateway: str
-    nd1_lifetime: int   # 0 means infinite
+    lifetime: int   # 0 means infinite
     timestamp: int      # Unix epoch when written
     address: str = ""   # SLAAC address or "" (managed) — kept for compat, not used for routing
     prefix: str = ""    # RA prefix address (e.g. "2001:db8:2::")
     plen: int = 0       # RA prefix length
 
     def remaining_lifetime(self, now: Optional[int] = None) -> int:
-        if self.nd1_lifetime == 0:
+        if self.lifetime == 0:
             return 0  # infinite — caller must handle 0 as special
         if now is None:
             now = int(time.time())
-        return max(0, self.nd1_lifetime - (now - self.timestamp))
+        return max(0, self.lifetime - (now - self.timestamp))
 
 
 @dataclass
@@ -64,7 +64,7 @@ def read_ipv6ra_state(state_dir: str, uplink_name: str) -> Optional[IPv6RaState]
     path = Path(state_dir) / f"{uplink_name}.ipv6ra.state"
     return _read_kv_state(path, IPv6RaState, {
         "gateway": str,
-        "nd1_lifetime": int,
+        "lifetime": int,
         "timestamp": int,
         "address": str,
         "prefix": str,

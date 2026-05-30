@@ -58,10 +58,10 @@ def del_ipv4_route(iface: str, table: int) -> None:
 # ---------------------------------------------------------------------------
 
 def replace_ipv6_route(gateway: str, iface: str, table: int,
-                        nd1_lifetime: int, remaining: int) -> None:
+                        lifetime: int, remaining: int) -> None:
     cmd = ["ip", "-6", "route", "replace", "default",
            "via", gateway, "dev", iface, "table", str(table)]
-    if nd1_lifetime != 0:
+    if lifetime != 0:
         cmd += ["expires", str(remaining)]
     _run(cmd)
 
