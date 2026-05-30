@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -49,6 +50,7 @@ class Daemon:
         self._radvd_restart_requested = False
         self._last_radvd_restart: float = 0.0
         self._running = True
+        self._executor: Optional[ThreadPoolExecutor] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -58,6 +60,7 @@ class Daemon:
         self._setup_signals()
         self._cfg = load_config(self._config_path)
         self._init_states()
+        self._executor = ThreadPoolExecutor(max_workers=len(self._cfg.uplinks))
         self._write_pid()
         log.info("uplinkmgr started (pid %d)", os.getpid())
         self._setup_ipv4_rules()
@@ -212,27 +215,44 @@ class Daemon:
     # Monitoring cycle
     # ------------------------------------------------------------------
 
+    def _probe_uplink(self, uplink: UplinkConfig) -> tuple:
+        cfg = self._cfg
+        tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
+        count = cfg.monitor.ping_count
+
+        ipv4_ok = monitor.probe_ipv4(uplink.interface, cfg.monitor.v4_hosts, count)
+
+        ipv6_ok = True
+        ipv6_probe_enabled = False
+        if uplink.ipv6_pd:
+            if monitor.ipv6_default_route_exists(tbl, uplink.interface):
+                ipv6_probe_enabled = True
+                ipv6_ok = monitor.probe_ipv6(uplink.interface, cfg.monitor.v6_hosts, count)
+            else:
+                log.debug("%s ipv6: no default route in table %d, skipping probe",
+                          uplink.name, tbl)
+
+        return uplink.name, ipv4_ok, ipv6_ok, ipv6_probe_enabled
+
     def _run_cycle(self) -> None:
         cfg = self._cfg
-        any_ipv6_change = False
 
+        futures = {
+            self._executor.submit(self._probe_uplink, uplink): uplink
+            for uplink in cfg.uplinks
+        }
+        probe_results: dict[str, tuple] = {}
+        for f in as_completed(futures):
+            name, ipv4_ok, ipv6_ok, enabled = f.result()
+            log.debug("%s ipv4: %s", name, "ok" if ipv4_ok else "fail")
+            if enabled:
+                log.debug("%s ipv6: %s", name, "ok" if ipv6_ok else "fail")
+            probe_results[name] = (ipv4_ok, ipv6_ok, enabled)
+
+        any_ipv6_change = False
         for uplink in cfg.uplinks:
             st = self._states[uplink.name]
-            tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
-
-            ipv4_ok = monitor.probe_ipv4(uplink.interface, cfg.monitor.v4_hosts)
-            log.debug("%s ipv4: %s", uplink.name, "ok" if ipv4_ok else "fail")
-
-            ipv6_ok = True
-            ipv6_probe_enabled = False
-            if uplink.ipv6_pd:
-                if monitor.ipv6_default_route_exists(tbl, uplink.interface):
-                    ipv6_probe_enabled = True
-                    ipv6_ok = monitor.probe_ipv6(uplink.interface, cfg.monitor.v6_hosts)
-                    log.debug("%s ipv6: %s", uplink.name, "ok" if ipv6_ok else "fail")
-                else:
-                    log.debug("%s ipv6: no default route in table %d, skipping probe",
-                              uplink.name, tbl)
+            ipv4_ok, ipv6_ok, ipv6_probe_enabled = probe_results[uplink.name]
 
             ipv4_changed, ipv6_changed = sm_update(
                 state=st,
@@ -495,6 +515,8 @@ class Daemon:
 
     def _cleanup(self) -> None:
         self._teardown_all()
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
         pid_path = Path(self._state_dir) / PID_FILE_NAME
         try:
             pid_path.unlink()

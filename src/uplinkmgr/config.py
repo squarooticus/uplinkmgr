@@ -35,6 +35,7 @@ class MonitorConfig:
     recovery_threshold: int
     v4_hosts: list[str]
     v6_hosts: list[str]
+    ping_count: int
 
 
 @dataclass
@@ -134,6 +135,7 @@ def _parse_monitor(raw: object) -> MonitorConfig:
         recovery_threshold=int(raw.get("recovery_threshold", DEFAULT_RECOVERY_THRESHOLD)),
         v4_hosts=list(raw.get("v4_hosts", DEFAULT_V4_HOSTS)),
         v6_hosts=list(raw.get("v6_hosts", DEFAULT_V6_HOSTS)),
+        ping_count=int(raw.get("ping_count", 3)),
     )
 
 
