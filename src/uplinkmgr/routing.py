@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# IPv4 policy rules (global — installed at daemon startup, removed on stop)
+# Policy rules (global — installed at daemon startup, removed on stop)
 # ---------------------------------------------------------------------------
 
 def add_ipv4_policy_rules(internal_traffic_priority: int, fwd_to_wan_priority: int,
@@ -26,6 +26,16 @@ def add_ipv4_policy_rules(internal_traffic_priority: int, fwd_to_wan_priority: i
 def del_ipv4_policy_rules(internal_traffic_priority: int, fwd_to_wan_priority: int) -> None:
     _run_del(["ip", "rule", "del", "priority", str(internal_traffic_priority)])
     _run_del(["ip", "rule", "del", "priority", str(fwd_to_wan_priority)])
+
+
+def add_ipv6_policy_rule(internal_traffic_priority: int) -> None:
+    _run(["ip", "-6", "rule", "add",
+          "lookup", "main", "suppress_prefixlength", "0",
+          "priority", str(internal_traffic_priority)])
+
+
+def del_ipv6_policy_rule(internal_traffic_priority: int) -> None:
+    _run_del(["ip", "-6", "rule", "del", "priority", str(internal_traffic_priority)])
 
 
 # ---------------------------------------------------------------------------
@@ -65,23 +75,10 @@ def del_ipv6_route(iface: str, table: int) -> None:
 # IPv6 rules
 # ---------------------------------------------------------------------------
 
-def add_ipv6_lo_to_internal_rule(addr: str, priority: int) -> None:
-    _run(["ip", "-6", "rule", "add",
-          "from", f"{addr}/128", "iif", "lo",
-          "lookup", "main", "suppress_prefixlength", "0",
-          "priority", str(priority)])
-
-
 def add_ipv6_lo_to_uplink_rule(addr: str, table: int, priority: int) -> None:
     _run(["ip", "-6", "rule", "add",
           "from", f"{addr}/128", "iif", "lo",
           "lookup", str(table), "priority", str(priority)])
-
-
-def add_ipv6_fwd_internal_traffic_rule(mv: str, priority: int) -> None:
-    _run(["ip", "-6", "rule", "add",
-          "iif", mv, "lookup", "main", "suppress_prefixlength", "0",
-          "priority", str(priority)])
 
 
 def add_ipv6_fwd_to_uplink_rule(mv: str, table: int, priority: int,

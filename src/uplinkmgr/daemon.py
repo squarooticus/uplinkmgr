@@ -32,7 +32,6 @@ class _UplinkRouting:
     ipv4_lo_to_uplink_addr: Optional[str] = None      # from-addr in IPv4 lo_to_uplink rule
     ipv6_route_installed: bool = False                 # per-uplink IPv6 default route present
     lo_to_uplink_addr: Optional[str] = None           # from-addr in IPv6 lo_to_uplink rule
-    macvlan_internal: set[str] = field(default_factory=set)
     macvlan_fwd: dict[str, Optional[str]] = field(default_factory=dict)  # mv -> prefix or None
     macvlan_prohibit: set[str] = field(default_factory=set)
 
@@ -45,6 +44,7 @@ class Daemon:
         self._states: dict[str, UplinkState] = {}
         self._installed: dict[str, _UplinkRouting] = {}
         self._ipv4_rules_installed: bool = False
+        self._ipv6_rule_installed: bool = False
         self._reload_requested = False
         self._reconcile_requested = False
         self._radvd_restart_requested = False
@@ -64,6 +64,7 @@ class Daemon:
         self._write_pid()
         log.info("uplinkmgr started (pid %d)", os.getpid())
         self._setup_ipv4_rules()
+        self._setup_ipv6_rules()
         self._reconcile_all()
         try:
             self._loop()
@@ -143,6 +144,7 @@ class Daemon:
         self._cfg = new_cfg
         self._init_states()
         self._setup_ipv4_rules()
+        self._setup_ipv6_rules()
         self._reconcile_all()
         log.info("config reloaded; all uplink states reset to UP")
 
@@ -293,6 +295,12 @@ class Daemon:
         )
         self._ipv4_rules_installed = True
 
+    def _setup_ipv6_rules(self) -> None:
+        routing.add_ipv6_policy_rule(
+            internal_traffic_priority=priority.ipv6_internal_traffic_priority(self._cfg),
+        )
+        self._ipv6_rule_installed = True
+
     def _reconcile_all(self) -> None:
         for uplink in self._cfg.uplinks:
             self._reconcile_uplink_ipv4(uplink)
@@ -378,16 +386,9 @@ class Daemon:
         if uplink_addr != installed.lo_to_uplink_addr:
             if installed.lo_to_uplink_addr is not None:
                 routing.del_ipv6_rule(
-                    priority.ipv6_lo_to_main_priority(cfg, uplink.index)
-                )
-                routing.del_ipv6_rule(
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index)
                 )
             if uplink_addr is not None:
-                routing.add_ipv6_lo_to_internal_rule(
-                    uplink_addr,
-                    priority.ipv6_lo_to_main_priority(cfg, uplink.index),
-                )
                 routing.add_ipv6_lo_to_uplink_rule(
                     uplink_addr, tbl,
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index),
@@ -409,12 +410,7 @@ class Daemon:
 
         for net_idx, net in enumerate(cfg.networks):
             mv = naming.macvlan_name(net.interface, uplink.index)
-            int_prio = priority.ipv6_internal_traffic_priority(cfg, uplink.index, net_idx)
             fwd_prio = priority.ipv6_fwd_to_uplink_priority(cfg, uplink.index, net_idx)
-
-            if mv not in installed.macvlan_internal:
-                routing.add_ipv6_fwd_internal_traffic_rule(mv, int_prio)
-                installed.macvlan_internal.add(mv)
 
             # fwd_to_uplink: reinstall only when prefix constraint changes
             current_fwd = installed.macvlan_fwd.get(mv, _MISSING)
@@ -439,11 +435,6 @@ class Daemon:
         cfg = self._cfg
         for net_idx, net in enumerate(cfg.networks):
             mv = naming.macvlan_name(net.interface, uplink.index)
-            if mv in installed.macvlan_internal:
-                routing.del_ipv6_rule(
-                    priority.ipv6_internal_traffic_priority(cfg, uplink.index, net_idx)
-                )
-                installed.macvlan_internal.discard(mv)
             if mv in installed.macvlan_fwd:
                 routing.del_ipv6_rule(
                     priority.ipv6_fwd_to_uplink_priority(cfg, uplink.index, net_idx)
@@ -486,9 +477,6 @@ class Daemon:
 
             if installed.lo_to_uplink_addr is not None:
                 routing.del_ipv6_rule(
-                    priority.ipv6_lo_to_main_priority(cfg, uplink.index)
-                )
-                routing.del_ipv6_rule(
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index)
                 )
                 installed.lo_to_uplink_addr = None
@@ -501,6 +489,12 @@ class Daemon:
                 fwd_to_wan_priority=priority.ipv4_fwd_to_wan_priority(cfg),
             )
             self._ipv4_rules_installed = False
+
+        if self._ipv6_rule_installed:
+            routing.del_ipv6_policy_rule(
+                internal_traffic_priority=priority.ipv6_internal_traffic_priority(cfg),
+            )
+            self._ipv6_rule_installed = False
 
     # ------------------------------------------------------------------
     # Helpers
