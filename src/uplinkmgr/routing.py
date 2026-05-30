@@ -75,9 +75,9 @@ def del_ipv6_route(iface: str, table: int) -> None:
 # IPv6 rules
 # ---------------------------------------------------------------------------
 
-def add_ipv6_lo_to_uplink_rule(addr: str, table: int, priority: int) -> None:
+def add_ipv6_lo_to_uplink_rule(prefix: str, table: int, priority: int) -> None:
     _run(["ip", "-6", "rule", "add",
-          "from", f"{addr}/128", "iif", "lo",
+          "from", prefix, "iif", "lo",
           "lookup", str(table), "priority", str(priority)])
 
 

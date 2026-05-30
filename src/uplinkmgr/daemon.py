@@ -31,7 +31,7 @@ class _UplinkRouting:
     ipv4_installed: Optional[str] = None              # installed IPv4 gateway, or None
     ipv4_lo_to_uplink_addr: Optional[str] = None      # from-addr in IPv4 lo_to_uplink rule
     ipv6_route_installed: bool = False                 # per-uplink IPv6 default route present
-    lo_to_uplink_addr: Optional[str] = None           # from-addr in IPv6 lo_to_uplink rule
+    lo_to_uplink_prefix: Optional[str] = None         # from-prefix in IPv6 lo_to_uplink rule
     macvlan_fwd: dict[str, Optional[str]] = field(default_factory=dict)  # mv -> prefix or None
     macvlan_prohibit: set[str] = field(default_factory=set)
 
@@ -373,27 +373,29 @@ class Daemon:
             routing.del_ipv6_route(uplink.interface, tbl)
             installed.ipv6_route_installed = False
 
-        # lo_to_uplink rule: present iff an uplink address is known AND health is UP
+        # lo_to_uplink rule: present iff an uplink prefix/address is known AND health is UP
         health = self._states[uplink.name]
         if health.ipv6 != LinkState.UP:
-            uplink_addr = None
+            uplink_prefix = None
         elif na_st is not None:
-            uplink_addr = na_st.address          # managed: DHCPv6 IA_NA
+            uplink_prefix = f"{na_st.address}/128"          # managed: IA_NA specific address
+        elif ra_st is not None and ra_st.prefix:
+            uplink_prefix = f"{ra_st.prefix}/{ra_st.plen}"  # SLAAC: full RA prefix
         elif ra_st is not None and ra_st.address:
-            uplink_addr = ra_st.address          # unmanaged: SLAAC from RA
+            uplink_prefix = f"{ra_st.address}/128"          # fallback: old state file
         else:
-            uplink_addr = None
-        if uplink_addr != installed.lo_to_uplink_addr:
-            if installed.lo_to_uplink_addr is not None:
+            uplink_prefix = None
+        if uplink_prefix != installed.lo_to_uplink_prefix:
+            if installed.lo_to_uplink_prefix is not None:
                 routing.del_ipv6_rule(
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index)
                 )
-            if uplink_addr is not None:
+            if uplink_prefix is not None:
                 routing.add_ipv6_lo_to_uplink_rule(
-                    uplink_addr, tbl,
+                    uplink_prefix, tbl,
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index),
                 )
-            installed.lo_to_uplink_addr = uplink_addr
+            installed.lo_to_uplink_prefix = uplink_prefix
 
         # Per-macvlan rules: driven by pd_st presence
         if pd_st is not None:
@@ -475,11 +477,11 @@ class Daemon:
                 routing.del_ipv6_route(uplink.interface, ipv6_tbl)
                 installed.ipv6_route_installed = False
 
-            if installed.lo_to_uplink_addr is not None:
+            if installed.lo_to_uplink_prefix is not None:
                 routing.del_ipv6_rule(
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index)
                 )
-                installed.lo_to_uplink_addr = None
+                installed.lo_to_uplink_prefix = None
 
             self._teardown_macvlan_rules(uplink, installed)
 
