@@ -54,7 +54,7 @@ def dhcpcd_conf(cfg: Config, head: str = "", tail: str = "") -> str:
                 for net in cfg.networks
             )
 
-    lines = [HEADER, f"allowinterfaces {' '.join(all_ifaces)}", ""]
+    lines = [f"allowinterfaces {' '.join(all_ifaces)}", ""]
 
     for uplink in cfg.uplinks:
         lines.append(f"interface {uplink.interface}")
@@ -75,17 +75,17 @@ def dhcpcd_conf(cfg: Config, head: str = "", tail: str = "") -> str:
         lines.append("")
 
     lines.append("hook /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr")
-    content = "\n".join(lines) + "\n"
+    body = "\n".join(lines) + "\n"
 
     if head:
         if not head.endswith("\n"):
             head += "\n"
-        content = head + "\n" + content
+        body = head + "\n" + body
     if tail:
         if not tail.endswith("\n"):
             tail += "\n"
-        content = content + "\n" + tail
-    return content
+        body = body + "\n" + tail
+    return HEADER + body
 
 
 # ---------------------------------------------------------------------------
