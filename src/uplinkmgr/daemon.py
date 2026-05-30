@@ -386,7 +386,7 @@ class Daemon:
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index)
                 )
             if uplink_addr is not None:
-                routing.add_ipv6_lo_to_main_rule(
+                routing.add_ipv6_lo_to_internal_rule(
                     uplink_addr,
                     priority.ipv6_lo_to_main_priority(cfg, uplink.index),
                 )
@@ -415,7 +415,7 @@ class Daemon:
             fwd_prio = priority.ipv6_fwd_to_uplink_priority(cfg, uplink.index, net_idx)
 
             if mv not in installed.macvlan_internal:
-                routing.add_ipv6_internal_traffic_rule(mv, int_prio)
+                routing.add_ipv6_fwd_internal_traffic_rule(mv, int_prio)
                 installed.macvlan_internal.add(mv)
 
             # fwd_to_uplink: reinstall only when prefix constraint changes
