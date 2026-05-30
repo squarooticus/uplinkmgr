@@ -57,49 +57,17 @@ def ipv4_table_name() -> str:
     return "uplinkmgr"
 
 
-def table_num(routing_table_start: int, uplink_idx: int) -> int:
+def ipv6_table_num(routing_table_start: int, uplink_idx: int) -> int:
     """IPv6 per-uplink routing table number."""
     return routing_table_start + 1 + uplink_idx
 
 
-def table_name(uplink_name: str) -> str:
+def ipv6_table_name(uplink_name: str) -> str:
     return f"uplinkmgr_{uplink_name}"
 
 
 def dhcpcd_unit_name(uplink_name: str) -> str:
     return f"dhcpcd-uplinkmgr-{uplink_name}.service"
-
-
-# ---------------------------------------------------------------------------
-# ip rule priority helpers — all take Config to derive N = uplinks * networks
-# ---------------------------------------------------------------------------
-
-def internal_traffic_priority(cfg: "Config", uplink_idx: int, net_idx: int) -> int:
-    return cfg.rule_priority_start + uplink_idx * len(cfg.networks) + net_idx
-
-
-def fwd_to_uplink_priority(cfg: "Config", uplink_idx: int, net_idx: int) -> int:
-    N = len(cfg.uplinks) * len(cfg.networks)
-    return cfg.rule_priority_start + N + uplink_idx * len(cfg.networks) + net_idx
-
-
-def lo_to_uplink_priority(cfg: "Config", uplink_idx: int) -> int:
-    N = len(cfg.uplinks) * len(cfg.networks)
-    return cfg.rule_priority_start + 2 * N + uplink_idx
-
-
-def prohibit_wrong_src_priority(cfg: "Config", uplink_idx: int, net_idx: int) -> int:
-    N = len(cfg.uplinks) * len(cfg.networks)
-    return cfg.rule_priority_start + 2 * N + len(cfg.uplinks) + uplink_idx * len(cfg.networks) + net_idx
-
-
-def ipv4_suppress_priority(cfg: "Config") -> int:
-    return cfg.rule_priority_start
-
-
-def ipv4_lookup_priority(cfg: "Config") -> int:
-    return cfg.rule_priority_start + 1
-
 
 
 def radvd_conf_path(uplink_name: str) -> str:

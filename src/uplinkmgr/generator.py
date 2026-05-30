@@ -221,8 +221,8 @@ def rt_tables(cfg: Config) -> str:
     lines = [HEADER, ""]
     lines.append(f"{naming.ipv4_table_num(cfg.routing_table_start)}\t{naming.ipv4_table_name()}")
     for uplink in cfg.uplinks:
-        num = naming.table_num(cfg.routing_table_start, uplink.index)
-        name = naming.table_name(uplink.name)
+        num = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
+        name = naming.ipv6_table_name(uplink.name)
         lines.append(f"{num}\t{name}")
     return "\n".join(lines) + "\n"
 

@@ -65,20 +65,20 @@ def del_ipv6_route(iface: str, table: int) -> None:
 # IPv6 rules
 # ---------------------------------------------------------------------------
 
-def add_lo_to_uplink_rule(addr: str, table: int, priority: int) -> None:
+def add_ipv6_lo_to_uplink_rule(addr: str, table: int, priority: int) -> None:
     _run(["ip", "-6", "rule", "add",
           "from", f"{addr}/128", "iif", "lo",
           "lookup", str(table), "priority", str(priority)])
 
 
-def add_internal_traffic_rule(mv: str, priority: int) -> None:
+def add_ipv6_internal_traffic_rule(mv: str, priority: int) -> None:
     _run(["ip", "-6", "rule", "add",
           "iif", mv, "lookup", "main", "suppress_prefixlength", "0",
           "priority", str(priority)])
 
 
-def add_fwd_to_uplink_rule(mv: str, table: int, priority: int,
-                             prefix: Optional[str] = None) -> None:
+def add_ipv6_fwd_to_uplink_rule(mv: str, table: int, priority: int,
+                                  prefix: Optional[str] = None) -> None:
     cmd = ["ip", "-6", "rule", "add"]
     if prefix is not None:
         cmd += ["from", prefix]
@@ -86,7 +86,7 @@ def add_fwd_to_uplink_rule(mv: str, table: int, priority: int,
     _run(cmd)
 
 
-def add_prohibit_wrong_src_rule(mv: str, priority: int) -> None:
+def add_ipv6_prohibit_wrong_src_rule(mv: str, priority: int) -> None:
     _run(["ip", "-6", "rule", "add",
           "iif", mv, "prohibit", "priority", str(priority)])
 
