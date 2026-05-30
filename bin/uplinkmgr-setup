@@ -32,10 +32,10 @@ def check_rt_conflicts(cfg, dry_run: bool) -> None:
     import re
 
     our_nums = {
-        naming.table_num(cfg.routing_table_start, u.index)
+        naming.ipv6_table_num(cfg.routing_table_start, u.index)
         for u in cfg.uplinks
     }
-    our_names = {naming.table_name(u.name) for u in cfg.uplinks}
+    our_names = {naming.ipv6_table_name(u.name) for u in cfg.uplinks}
 
     rt_dirs = ["/etc/iproute2/rt_tables.d", "/etc/iproute2"]
     existing_nums: dict[int, str] = {}
@@ -104,7 +104,9 @@ def main() -> None:
 
     # --- /etc/dhcpcd.conf ---
     _backup_dhcpcd_conf(dry_run)
-    generator.write_file("/etc/dhcpcd.conf", generator.dhcpcd_conf(cfg), dry_run)
+    head = _read_optional_file("/etc/uplinkmgr/dhcpcd.conf.head")
+    tail = _read_optional_file("/etc/uplinkmgr/dhcpcd.conf.tail")
+    generator.write_file("/etc/dhcpcd.conf", generator.dhcpcd_conf(cfg, head=head, tail=tail), dry_run)
 
     # --- per-uplink radvd files ---
     for uplink in cfg.uplinks:
@@ -166,6 +168,14 @@ def main() -> None:
             if uplink.ipv6_pd:
                 print(f"  systemctl restart {naming.radvd_unit_name(uplink.name)}")
         print("  systemctl restart uplinkmgr.service")
+
+
+def _read_optional_file(path: str) -> str:
+    try:
+        from pathlib import Path
+        return Path(path).read_text()
+    except FileNotFoundError:
+        return ""
 
 
 def _backup_dhcpcd_conf(dry_run: bool) -> None:

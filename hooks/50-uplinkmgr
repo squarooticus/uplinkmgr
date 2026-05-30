@@ -52,7 +52,7 @@ case "$reason" in
 
     # IPv6 router advertisement: write gateway state file and signal daemon
     ROUTERADVERT)
-        [ "$UPLINKMGR_IPV6_PD" = true ] || return 0
+        [ "$UPLINKMGR_IPV6_PD" = true ] || [ "$UPLINKMGR_IPV6_IA_NA" = true ] || return 0
 
         GW6="$nd1_from"
         ND1_LIFETIME="${nd1_lifetime:-0}"
@@ -78,7 +78,7 @@ case "$reason" in
 
     # IPv6 lease: write PD and IA_NA state files and signal daemon
     BOUND6|RENEW6)
-        [ "$UPLINKMGR_IPV6_PD" = true ] || return 0
+        [ "$UPLINKMGR_IPV6_PD" = true ] || [ "$UPLINKMGR_IPV6_IA_NA" = true ] || return 0
 
         DELEGATED_PREFIX="${dhcp6_ia_pd1_prefix1:-}"
         DELEGATED_LENGTH="${dhcp6_ia_pd1_prefix1_length:-}"
@@ -106,7 +106,7 @@ case "$reason" in
 
     # IPv6 expiry: remove all IPv6 state files and signal daemon
     EXPIRE6|STOP6)
-        [ "$UPLINKMGR_IPV6_PD" = true ] || return 0
+        [ "$UPLINKMGR_IPV6_PD" = true ] || [ "$UPLINKMGR_IPV6_IA_NA" = true ] || return 0
 
         rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state"
         rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"

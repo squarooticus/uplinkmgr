@@ -203,7 +203,7 @@ class Daemon:
         now = int(time.time())
         min_val: Optional[int] = None
         for uplink in self._cfg.uplinks:
-            if not uplink.ipv6_pd:
+            if not uplink.ipv6_pd and not uplink.ia_na:
                 continue
             ra_st = state.read_ipv6ra_state(self._state_dir, uplink.name)
             if ra_st is None or ra_st.lifetime == 0:
@@ -226,7 +226,7 @@ class Daemon:
 
         ipv6_ok = True
         ipv6_probe_enabled = False
-        if uplink.ipv6_pd:
+        if uplink.ipv6_pd or uplink.ia_na:
             if monitor.ipv6_default_route_exists(tbl, uplink.interface):
                 ipv6_probe_enabled = True
                 ipv6_ok = monitor.probe_ipv6(uplink.interface, cfg.monitor.v6_hosts, count)
@@ -351,7 +351,7 @@ class Daemon:
 
     def _reconcile_uplink_ipv6(self, uplink: UplinkConfig) -> None:
         """Reconcile IPv6 route and rules in the per-uplink table for one uplink."""
-        if not uplink.ipv6_pd:
+        if not uplink.ipv6_pd and not uplink.ia_na:
             return
 
         cfg = self._cfg

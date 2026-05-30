@@ -44,7 +44,7 @@ def interfaces_file(cfg: Config) -> str:
 # dhcpcd config
 # ---------------------------------------------------------------------------
 
-def dhcpcd_conf(cfg: Config) -> str:
+def dhcpcd_conf(cfg: Config, head: str = "", tail: str = "") -> str:
     all_ifaces: list[str] = []
     for uplink in cfg.uplinks:
         all_ifaces.append(uplink.interface)
@@ -59,19 +59,33 @@ def dhcpcd_conf(cfg: Config) -> str:
     for uplink in cfg.uplinks:
         lines.append(f"interface {uplink.interface}")
         lines.append(f"    metric {uplink.metric}")
-        if uplink.ipv6_pd:
+        if uplink.ipv6_pd or uplink.ia_na:
             lines.append("    ipv6rs")
-            lines.append("    ia_na 1")
-            pd_delegations = " ".join(
-                f"{naming.macvlan_name(net.interface, uplink.index)}/{net_idx}/64"
-                for net_idx, net in enumerate(cfg.networks)
-            )
-            lines.append(f"    ia_pd 2/::/{uplink.ipv6_pd_hint} {pd_delegations}")
+            iaid = 1
+            if uplink.ia_na:
+                lines.append(f"    ia_na {iaid}")
+                iaid += 1
+            if uplink.ipv6_pd:
+                pd_delegations = " ".join(
+                    f"{naming.macvlan_name(net.interface, uplink.index)}/{net_idx}/64"
+                    for net_idx, net in enumerate(cfg.networks)
+                )
+                lines.append(f"    ia_pd {iaid}/::/{uplink.ipv6_pd_hint} {pd_delegations}")
             lines.append("    duid")
         lines.append("")
 
     lines.append("hook /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr")
-    return "\n".join(lines) + "\n"
+    content = "\n".join(lines) + "\n"
+
+    if head:
+        if not head.endswith("\n"):
+            head += "\n"
+        content = head + "\n" + content
+    if tail:
+        if not tail.endswith("\n"):
+            tail += "\n"
+        content = content + "\n" + tail
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +251,7 @@ def env_file(cfg: Config, uplink: UplinkConfig) -> str:
         f"UPLINKMGR_UPLINK_NAME={uplink.name}\n"
         f"UPLINKMGR_WAN_IFACE={uplink.interface}\n"
         f"UPLINKMGR_IPV6_PD={'true' if uplink.ipv6_pd else 'false'}\n"
+        f"UPLINKMGR_IPV6_IA_NA={'true' if uplink.ia_na else 'false'}\n"
     )
 
 

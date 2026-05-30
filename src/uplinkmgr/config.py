@@ -50,6 +50,7 @@ class UplinkConfig:
     interface: str
     ipv6_pd: bool
     ipv6_pd_hint: int
+    ia_na: bool
     metric: int
     index: int  # 0-based position in uplinks list
 
@@ -170,6 +171,7 @@ def _parse_uplinks(raw: object, routing_table_start: int) -> list[UplinkConfig]:
         iface = str(entry.get("interface", ""))
         ipv6_pd = bool(entry.get("ipv6_pd", False))
         ipv6_pd_hint = int(entry.get("ipv6_pd_hint", DEFAULT_IPV6_PD_HINT))
+        ia_na = bool(entry.get("ia_na", False))
         metric = int(entry.get("metric", DEFAULT_METRIC_MULTIPLIER * (i + 1)))
 
         if not name:
@@ -197,6 +199,7 @@ def _parse_uplinks(raw: object, routing_table_start: int) -> list[UplinkConfig]:
             interface=iface,
             ipv6_pd=ipv6_pd,
             ipv6_pd_hint=ipv6_pd_hint,
+            ia_na=ia_na,
             metric=metric,
             index=i,
         ))
