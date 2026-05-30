@@ -33,10 +33,11 @@ def ipv4_lookup_priority(cfg: "Config") -> int:
 #
 # Let N = n_uplinks * n_networks.
 #
-# rule_priority_start + 0*N ..                 ipv6_internal_traffic_priority
-# rule_priority_start + 1*N ..                 ipv6_fwd_to_uplink_priority
-# rule_priority_start + 2*N + idx              ipv6_lo_to_uplink_priority
-# rule_priority_start + 2*N + n_uplinks + ..   ipv6_prohibit_wrong_src_priority
+# rule_priority_start + 0*N ..                   ipv6_internal_traffic_priority
+# rule_priority_start + 1*N ..                   ipv6_fwd_to_uplink_priority
+# rule_priority_start + 2*N + idx                ipv6_lo_to_main_priority
+# rule_priority_start + 2*N + n_uplinks + idx    ipv6_lo_to_uplink_priority
+# rule_priority_start + 2*N + 2*n_uplinks + ..   ipv6_prohibit_wrong_src_priority
 # ---------------------------------------------------------------------------
 
 def ipv6_internal_traffic_priority(cfg: "Config", uplink_idx: int, net_idx: int) -> int:
@@ -48,12 +49,17 @@ def ipv6_fwd_to_uplink_priority(cfg: "Config", uplink_idx: int, net_idx: int) ->
     return cfg.rule_priority_start + N + uplink_idx * len(cfg.networks) + net_idx
 
 
-def ipv6_lo_to_uplink_priority(cfg: "Config", uplink_idx: int) -> int:
+def ipv6_lo_to_main_priority(cfg: "Config", uplink_idx: int) -> int:
     N = len(cfg.uplinks) * len(cfg.networks)
     return cfg.rule_priority_start + 2 * N + uplink_idx
 
 
+def ipv6_lo_to_uplink_priority(cfg: "Config", uplink_idx: int) -> int:
+    N = len(cfg.uplinks) * len(cfg.networks)
+    return cfg.rule_priority_start + 2 * N + len(cfg.uplinks) + uplink_idx
+
+
 def ipv6_prohibit_wrong_src_priority(cfg: "Config", uplink_idx: int, net_idx: int) -> int:
     N = len(cfg.uplinks) * len(cfg.networks)
-    return (cfg.rule_priority_start + 2 * N + len(cfg.uplinks)
+    return (cfg.rule_priority_start + 2 * N + 2 * len(cfg.uplinks)
             + uplink_idx * len(cfg.networks) + net_idx)

@@ -380,9 +380,16 @@ class Daemon:
         if uplink_addr != installed.lo_to_uplink_addr:
             if installed.lo_to_uplink_addr is not None:
                 routing.del_ipv6_rule(
+                    priority.ipv6_lo_to_main_priority(cfg, uplink.index)
+                )
+                routing.del_ipv6_rule(
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index)
                 )
             if uplink_addr is not None:
+                routing.add_ipv6_lo_to_main_rule(
+                    uplink_addr,
+                    priority.ipv6_lo_to_main_priority(cfg, uplink.index),
+                )
                 routing.add_ipv6_lo_to_uplink_rule(
                     uplink_addr, tbl,
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index),
@@ -480,6 +487,9 @@ class Daemon:
                 installed.ipv6_route_installed = False
 
             if installed.lo_to_uplink_addr is not None:
+                routing.del_ipv6_rule(
+                    priority.ipv6_lo_to_main_priority(cfg, uplink.index)
+                )
                 routing.del_ipv6_rule(
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index)
                 )
