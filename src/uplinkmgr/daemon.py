@@ -468,7 +468,7 @@ class Daemon:
                 )
                 installed.ipv4_lo_to_uplink_addr = None
 
-            if not uplink.ipv6_pd:
+            if not uplink.ipv6_pd and not uplink.ia_na:
                 continue
 
             ipv6_tbl = per_uplink_tbl
@@ -521,6 +521,21 @@ class Daemon:
         self._teardown_all()
         if self._executor is not None:
             self._executor.shutdown(wait=False)
+
+        # Regenerate radvd configs in "all UP" state and SIGHUP so radvd
+        # continues advertising correctly after the daemon stops (§13.3).
+        if self._cfg is not None:
+            all_up_states = {
+                u.name: UplinkState(name=u.name, ipv4=LinkState.UP, ipv6=LinkState.UP)
+                for u in self._cfg.uplinks
+            }
+            radvd.regenerate_all(
+                cfg=self._cfg,
+                states=all_up_states,
+                state_dir=self._state_dir,
+                action="sighup",
+            )
+
         pid_path = Path(self._state_dir) / PID_FILE_NAME
         try:
             pid_path.unlink()
