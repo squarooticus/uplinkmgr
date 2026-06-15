@@ -3,9 +3,21 @@
 # Installed at /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr
 # Sourced by dhcpcd on every lease event.
 
-UPLINKMGR_ENV_DIR=/etc/uplinkmgr/uplinks
-UPLINKMGR_STATE_DIR=/run/uplinkmgr
+UPLINKMGR_ENV_DIR="${UPLINKMGR_ENV_DIR:-/etc/uplinkmgr/uplinks}"
+UPLINKMGR_STATE_DIR="${UPLINKMGR_STATE_DIR:-/run/uplinkmgr}"
 UPLINKMGR_PID_FILE="${UPLINKMGR_STATE_DIR}/uplinkmgr.pid"
+
+_debug_log() {
+    if [ -n "$UPLINKMGR_HOOK_LOG" ]; then
+        echo "$@" >>"$UPLINKMGR_HOOK_LOG"
+    fi
+}
+
+if [ -n "$UPLINKMGR_HOOK_LOG" ]; then
+    printf '\n--- %s reason=%s interface=%s ---\n' \
+        "$(date -Iseconds)" "$reason" "$interface" >> "$UPLINKMGR_HOOK_LOG"
+    env | sort >> "$UPLINKMGR_HOOK_LOG"
+fi
 
 # --- Identify uplink ---
 
@@ -15,6 +27,8 @@ env_file="${UPLINKMGR_ENV_DIR}/${interface}.env"
 
 # Only process events on the WAN interface; macvlan events are ignored.
 [ "$interface" = "$UPLINKMGR_WAN_IFACE" ] || return 0
+
+_debug_log "$interface is WAN iface"
 
 # --- Helpers ---
 
@@ -36,7 +50,7 @@ case "$reason" in
 
     # IPv4: write gateway state file and signal daemon
     BOUND|RENEW|REBIND|REBOOT)
-        GW4="${routers%% *}"  # take first gateway
+        GW4="${new_routers%% *}"  # take first gateway
         [ -n "$GW4" ] || return 0
 
         mkdir -p "$UPLINKMGR_STATE_DIR"
@@ -54,6 +68,8 @@ case "$reason" in
     ROUTERADVERT)
         [ "$UPLINKMGR_IPV6_PD" = true ] || [ "$UPLINKMGR_IPV6_IA_NA" = true ] || return 0
 
+        _debug_log "wants IPv6 PD or NA"
+
         GW6="$nd1_from"
         ND1_LIFETIME="${nd1_lifetime:-0}"
         ND1_PREFIX="${nd1_prefix_information1_prefix:-}"
@@ -61,12 +77,16 @@ case "$reason" in
 
         [ -n "$GW6" ] || return 0
 
+        _debug_log "has GW6 $GW6"
+
         # M flag: DHCPv6 assigns addresses; address comes from IA_NA (ipv6na.state).
         # No M flag: SLAAC; address is the kernel-assigned EUI64 address from the RA prefix.
         case "$nd1_flags" in
             *M*) SLAAC_ADDR="" ;;
             *)   SLAAC_ADDR="${nd1_addr1:-}" ;;
         esac
+
+        _debug_log "writing state file ${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state"
 
         mkdir -p "$UPLINKMGR_STATE_DIR"
         _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state" \
@@ -77,15 +97,18 @@ case "$reason" in
         ;;
 
     # IPv6 lease: write PD and IA_NA state files and signal daemon
-    BOUND6|RENEW6)
+    BOUND6|RENEW6|REBIND6)
         [ "$UPLINKMGR_IPV6_PD" = true ] || [ "$UPLINKMGR_IPV6_IA_NA" = true ] || return 0
 
-        DELEGATED_PREFIX="${dhcp6_ia_pd1_prefix1:-}"
-        DELEGATED_LENGTH="${dhcp6_ia_pd1_prefix1_length:-}"
-        VLTIME="${dhcp6_ia_pd1_prefix1_vltime:-}"
-        PLTIME="${dhcp6_ia_pd1_prefix1_pltime:-}"
+        _debug_log "wants IPv6 PD or NA"
+
+        DELEGATED_PREFIX="${new_dhcp6_ia_pd1_prefix1:-}"
+        DELEGATED_LENGTH="${new_dhcp6_ia_pd1_prefix1_length:-}"
+        VLTIME="${new_dhcp6_ia_pd1_prefix1_vltime:-}"
+        PLTIME="${new_dhcp6_ia_pd1_prefix1_pltime:-}"
 
         if [ -n "$DELEGATED_PREFIX" ] && [ -n "$DELEGATED_LENGTH" ]; then
+            _debug_log "writing PD state file ${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
             mkdir -p "$UPLINKMGR_STATE_DIR"
             _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state" \
                 'delegated_prefix=%s\ndelegated_length=%s\nvltime=%s\npltime=%s\ntimestamp=%s\n' \
@@ -93,10 +116,11 @@ case "$reason" in
                 "$VLTIME" "$PLTIME" "$(date +%s)"
         fi
 
-        if [ -n "$new_ip6_address" ]; then
+        if [ -n "$new_dhcp6_ia_na1_ia_addr1" ]; then
+            _debug_log "writing NA state file ${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
             mkdir -p "$UPLINKMGR_STATE_DIR"
             _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state" \
-                'address=%s\n' "$new_ip6_address"
+                'address=%s\n' "$new_dhcp6_ia_na1_ia_addr1"
         else
             rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
         fi

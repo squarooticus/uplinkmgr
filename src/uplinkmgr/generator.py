@@ -74,7 +74,6 @@ def dhcpcd_conf(cfg: Config, head: str = "", tail: str = "") -> str:
             lines.append("    duid")
         lines.append("")
 
-    lines.append("hook /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr")
     body = "\n".join(lines) + "\n"
 
     if head:

@@ -34,12 +34,30 @@ _PYTHON = sys.executable
 _FAILOVER_WAIT = 12
 _DAEMON_BIN = str(Path(__file__).parent.parent.parent / "bin" / "uplinkmgr")
 _SETUP_BIN = str(Path(__file__).parent.parent.parent / "bin" / "uplinkmgr-setup")
+_SRC_DIR = str(Path(__file__).parent.parent.parent / "src")
 
 
-def _popen_in(ns_name, *cmd):
+def _daemon_env():
+    _pp = os.environ.get("PYTHONPATH", "")
+    return {**os.environ, "PYTHONPATH": f"{_SRC_DIR}:{_pp}" if _pp else _SRC_DIR}
+
+
+def _popen_in(ns_name, *cmd, log_dir=None, env=None):
+    if log_dir is not None:
+        exe = cmd[0] if cmd else "proc"
+        if "python" in exe and len(cmd) > 1:
+            script = next((c for c in cmd[1:] if "/" in c or c.endswith(".py")), exe)
+            stem = Path(script).stem
+        else:
+            stem = Path(exe).stem
+        log = open(str(log_dir / f"{stem}-{ns_name}.log"), "w")
+        out, err = log, log
+    else:
+        out, err = subprocess.DEVNULL, subprocess.DEVNULL
     return subprocess.Popen(
         ["ip", "netns", "exec", ns_name] + list(cmd),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=out, stderr=err,
+        **({"env": env} if env is not None else {}),
     )
 
 
@@ -64,6 +82,7 @@ class TestIPv6PD:
         result = subprocess.run(
             [_PYTHON, _SETUP_BIN, "--config", str(cfg), "--dry-run"],
             capture_output=True, text=True,
+            env=_daemon_env(),
         )
         assert result.returncode == 0, result.stderr
         assert f"auto {topo.mv0}" in result.stdout
@@ -76,22 +95,25 @@ class TestIPv6PD:
         try:
             procs += [
                 _popen_in(topo.ns_isp1, _PYTHON, str(_HELPERS_DIR / "dhcp4.py"),
-                           topo.wan1_isp, topo.isp1_gw, topo.isp1_wan_ip, topo.isp1_gw),
+                           topo.wan1_isp, topo.isp1_gw, topo.isp1_wan_ip, topo.isp1_gw,
+                           log_dir=tmp_path),
                 _popen_in(topo.ns_isp1, _PYTHON, str(_HELPERS_DIR / "dhcp6.py"),
                            topo.wan1_isp, topo.isp1_delegated_prefix,
-                           str(topo.isp1_prefix_len)),
+                           str(topo.isp1_prefix_len),
+                           log_dir=tmp_path),
                 _popen_in(topo.ns_isp1, _PYTHON, str(_HELPERS_DIR / "ra.py"),
-                           topo.wan1_isp, topo.isp1_delegated_prefix, "64"),
+                           topo.wan1_isp, topo.isp1_delegated_prefix, "64",
+                           log_dir=tmp_path),
             ]
             cfg = write_uplinkmgr_yaml(tmp_path, topo)
             procs.append(_popen_in(topo.ns_router, "dhcpcd",
                                     "--config", str(write_dhcpcd_conf(tmp_path, topo)),
-                                    "--nobackground",
-                                    "--rundir", str(tmp_path / "dhcpcd"),
-                                    "--dbdir", str(tmp_path / "dhcpcd-db")))
+                                    "--nobackground", "-d",
+                                    "-j", str(tmp_path / "dhcpcd.log"),
+                                    log_dir=tmp_path))
 
             assert _wait_state(topo, "isp1", "ipv6pd", timeout=25), \
-                "ipv6pd.state not written — DHCPv6 PD exchange may not have completed"
+                f"ipv6pd.state not written — check {tmp_path}/dhcpcd.log and {topo.state_dir}/hook.log"
 
             content = Path(f"{topo.state_dir}/isp1.ipv6pd.state").read_text()
             assert "delegated_prefix=" in content
@@ -106,34 +128,49 @@ class TestIPv6PD:
         try:
             procs += [
                 _popen_in(topo.ns_isp1, _PYTHON, str(_HELPERS_DIR / "dhcp4.py"),
-                           topo.wan1_isp, topo.isp1_gw, topo.isp1_wan_ip, topo.isp1_gw),
+                           topo.wan1_isp, topo.isp1_gw, topo.isp1_wan_ip, topo.isp1_gw,
+                           log_dir=tmp_path),
                 _popen_in(topo.ns_isp2, _PYTHON, str(_HELPERS_DIR / "dhcp4.py"),
-                           topo.wan2_isp, topo.isp2_gw, topo.isp2_wan_ip, topo.isp2_gw),
+                           topo.wan2_isp, topo.isp2_gw, topo.isp2_wan_ip, topo.isp2_gw,
+                           log_dir=tmp_path),
                 _popen_in(topo.ns_isp1, _PYTHON, str(_HELPERS_DIR / "dhcp6.py"),
                            topo.wan1_isp, topo.isp1_delegated_prefix,
-                           str(topo.isp1_prefix_len)),
+                           str(topo.isp1_prefix_len),
+                           log_dir=tmp_path),
                 _popen_in(topo.ns_isp1, _PYTHON, str(_HELPERS_DIR / "ra.py"),
-                           topo.wan1_isp, topo.isp1_delegated_prefix, "64"),
+                           topo.wan1_isp, topo.isp1_delegated_prefix, "64",
+                           log_dir=tmp_path),
             ]
             cfg = write_uplinkmgr_yaml(tmp_path, topo)
+
+            daemon_proc = _popen_in(topo.ns_router, _PYTHON, _DAEMON_BIN,
+                                     "--config", str(cfg),
+                                     "--state-dir", topo.state_dir,
+                                     "--log-level", "DEBUG",
+                                     log_dir=tmp_path, env=_daemon_env())
+            procs.append(daemon_proc)
+            daemon_log = str(tmp_path / f"uplinkmgr-{topo.ns_router}.log")
+            assert ns.wait_for_file(f"{topo.state_dir}/uplinkmgr.pid", timeout=10), \
+                f"daemon PID file never written — see {daemon_log}"
+            assert daemon_proc.poll() is None, \
+                f"daemon exited early (rc={daemon_proc.returncode}) — see {daemon_log}"
+
             procs.append(_popen_in(topo.ns_router, "dhcpcd",
                                     "--config", str(write_dhcpcd_conf(tmp_path, topo)),
-                                    "--nobackground",
-                                    "--rundir", str(tmp_path / "dhcpcd"),
-                                    "--dbdir", str(tmp_path / "dhcpcd-db")))
+                                    "--nobackground", "-d",
+                                    "-j", str(tmp_path / "dhcpcd.log"),
+                                    log_dir=tmp_path))
 
-            assert _wait_state(topo, "isp1", "ipv4")
-            assert _wait_state(topo, "isp1", "ipv6pd", timeout=25)
-
-            procs.append(_popen_in(topo.ns_router, _PYTHON, _DAEMON_BIN,
-                                    "--config", str(cfg),
-                                    "--state-dir", topo.state_dir,
-                                    "--log-level", "DEBUG"))
-            time.sleep(5)
+            assert _wait_state(topo, "isp1", "ipv4"), \
+                f"isp1.ipv4.state not written — check {tmp_path}/dhcpcd.log, daemon log: {daemon_log}"
+            assert _wait_state(topo, "isp1", "ipv6pd", timeout=25), \
+                f"isp1.ipv6pd.state not written — check {topo.state_dir}/hook.log, daemon log: {daemon_log}"
+            time.sleep(3)  # allow daemon one reconcile cycle after SIGUSR1
 
             rules = ns.rule_show(topo.ns_router, v6=True)
             assert topo.mv0 in rules, \
-                f"fwd_to_uplink rule for {topo.mv0} missing from ip -6 rule: {rules}"
+                f"fwd_to_uplink rule for {topo.mv0} missing from ip -6 rule: {rules}" \
+                f"\n  daemon log: {daemon_log}"
         finally:
             _stop(procs)
 
@@ -144,31 +181,45 @@ class TestIPv6PD:
         try:
             procs += [
                 _popen_in(topo.ns_isp1, _PYTHON, str(_HELPERS_DIR / "dhcp4.py"),
-                           topo.wan1_isp, topo.isp1_gw, topo.isp1_wan_ip, topo.isp1_gw),
+                           topo.wan1_isp, topo.isp1_gw, topo.isp1_wan_ip, topo.isp1_gw,
+                           log_dir=tmp_path),
                 _popen_in(topo.ns_isp2, _PYTHON, str(_HELPERS_DIR / "dhcp4.py"),
-                           topo.wan2_isp, topo.isp2_gw, topo.isp2_wan_ip, topo.isp2_gw),
+                           topo.wan2_isp, topo.isp2_gw, topo.isp2_wan_ip, topo.isp2_gw,
+                           log_dir=tmp_path),
                 _popen_in(topo.ns_isp1, _PYTHON, str(_HELPERS_DIR / "dhcp6.py"),
                            topo.wan1_isp, topo.isp1_delegated_prefix,
-                           str(topo.isp1_prefix_len)),
+                           str(topo.isp1_prefix_len),
+                           log_dir=tmp_path),
                 _popen_in(topo.ns_isp1, _PYTHON, str(_HELPERS_DIR / "ra.py"),
-                           topo.wan1_isp, topo.isp1_delegated_prefix, "64"),
+                           topo.wan1_isp, topo.isp1_delegated_prefix, "64",
+                           log_dir=tmp_path),
             ]
             cfg = write_uplinkmgr_yaml(tmp_path, topo)
+
+            daemon_proc = _popen_in(topo.ns_router, _PYTHON, _DAEMON_BIN,
+                                     "--config", str(cfg),
+                                     "--state-dir", topo.state_dir,
+                                     "--log-level", "DEBUG",
+                                     log_dir=tmp_path, env=_daemon_env())
+            procs.append(daemon_proc)
+            daemon_log = str(tmp_path / f"uplinkmgr-{topo.ns_router}.log")
+            assert ns.wait_for_file(f"{topo.state_dir}/uplinkmgr.pid", timeout=10), \
+                f"daemon PID file never written — see {daemon_log}"
+            assert daemon_proc.poll() is None, \
+                f"daemon exited early (rc={daemon_proc.returncode}) — see {daemon_log}"
+
             procs.append(_popen_in(topo.ns_router, "dhcpcd",
                                     "--config", str(write_dhcpcd_conf(tmp_path, topo)),
-                                    "--nobackground",
-                                    "--rundir", str(tmp_path / "dhcpcd"),
-                                    "--dbdir", str(tmp_path / "dhcpcd-db")))
+                                    "--nobackground", "-d",
+                                    "-j", str(tmp_path / "dhcpcd.log"),
+                                    log_dir=tmp_path))
 
-            assert _wait_state(topo, "isp1", "ipv4")
-            assert _wait_state(topo, "isp1", "ipv6pd", timeout=25)
-            assert _wait_state(topo, "isp1", "ipv6ra", timeout=15)
-
-            procs.append(_popen_in(topo.ns_router, _PYTHON, _DAEMON_BIN,
-                                    "--config", str(cfg),
-                                    "--state-dir", topo.state_dir,
-                                    "--log-level", "DEBUG"))
-            time.sleep(4)
+            assert _wait_state(topo, "isp1", "ipv4"), \
+                f"isp1.ipv4.state not written — check {tmp_path}/dhcpcd.log, daemon log: {daemon_log}"
+            assert _wait_state(topo, "isp1", "ipv6pd", timeout=25), \
+                f"isp1.ipv6pd.state not written — check {topo.state_dir}/hook.log, daemon log: {daemon_log}"
+            assert _wait_state(topo, "isp1", "ipv6ra", timeout=15), \
+                f"isp1.ipv6ra.state not written — daemon log: {daemon_log}"
 
             # Simulate IPv6 failure by bringing wan1 down in the router namespace
             ns.ip_in(topo.ns_router, "link", "set", topo.wan1, "down", check=False)
@@ -178,6 +229,7 @@ class TestIPv6PD:
             if conf_path.exists():
                 content = conf_path.read_text()
                 assert "AdvDefaultPreference low" in content, \
-                    f"Expected 'low' preference after IPv6 failure:\n{content[:500]}"
+                    f"Expected 'low' preference after IPv6 failure:\n{content[:500]}" \
+                    f"\n  daemon log: {daemon_log}"
         finally:
             _stop(procs)

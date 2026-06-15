@@ -30,30 +30,37 @@ _HELPERS_DIR = Path(__file__).parent / "helpers"
 _PYTHON = sys.executable
 _FAILOVER_WAIT = 12   # interval=3, threshold=2 → 6s min + buffer
 _DAEMON_BIN = str(Path(__file__).parent.parent.parent / "bin" / "uplinkmgr")
+_SRC_DIR = str(Path(__file__).parent.parent.parent / "src")
 
 
 def _start_dhcp4_in_ns(topo, ns_name, iface, server_ip, client_ip, gateway):
+    log_dir = Path(topo.state_dir).parent
+    log = open(str(log_dir / f"dhcp4-{ns_name}.log"), "w")
     cmd = ["ip", "netns", "exec", ns_name,
            _PYTHON, str(_HELPERS_DIR / "dhcp4.py"),
            iface, server_ip, client_ip, gateway]
-    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return subprocess.Popen(cmd, stdout=log, stderr=log)
 
 
 def _start_dhcpcd(topo, dhcpcd_conf):
+    log_path = str(Path(dhcpcd_conf).parent / "dhcpcd.log")
+    log = open(log_path, "w")
     cmd = ["ip", "netns", "exec", topo.ns_router,
            "dhcpcd", "--config", str(dhcpcd_conf), "--nobackground",
-           "--rundir", str(Path(dhcpcd_conf).parent / "dhcpcd"),
-           "--dbdir", str(Path(dhcpcd_conf).parent / "dhcpcd-db")]
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+           "-d", "-j", log_path]
+    return subprocess.Popen(cmd, stdout=log, stderr=log)
 
 
 def _start_daemon(topo, cfg_path):
+    log = open(str(Path(cfg_path).parent / "daemon.log"), "w")
+    _pp = os.environ.get("PYTHONPATH", "")
+    env = {**os.environ, "PYTHONPATH": f"{_SRC_DIR}:{_pp}" if _pp else _SRC_DIR}
     cmd = ["ip", "netns", "exec", topo.ns_router,
            _PYTHON, _DAEMON_BIN,
            "--config", str(cfg_path),
            "--state-dir", topo.state_dir,
            "--log-level", "DEBUG"]
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
 
 
 def _wait_state(topo, name, kind, timeout=15):

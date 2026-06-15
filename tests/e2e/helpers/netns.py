@@ -8,11 +8,28 @@ from __future__ import annotations
 
 import subprocess
 import time
+from pathlib import Path
+from typing import Optional
+
+_log_dir: Optional[Path] = None
+
+
+def set_log_dir(path: Path) -> None:
+    global _log_dir
+    _log_dir = path
 
 
 def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(list(args), check=check,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run(list(args), check=check,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if _log_dir is not None:
+        with open(str(_log_dir / "netns.log"), "a") as f:
+            print(f"+ {' '.join(args)} -> {result.returncode}", file=f)
+            if result.stdout:
+                f.write(result.stdout.decode(errors="replace"))
+            if result.stderr:
+                f.write(result.stderr.decode(errors="replace"))
+    return result
 
 
 def create_ns(name: str) -> None:
@@ -31,6 +48,11 @@ def add_veth(name: str, peer: str,
         _run("ip", "link", "set", name, "netns", ns)
     if peer_ns:
         _run("ip", "link", "set", peer, "netns", peer_ns)
+
+
+def add_macvlan(ns: str, name: str, parent: str) -> None:
+    """Create a macvlan interface over parent inside ns."""
+    ip_in(ns, "link", "add", name, "link", parent, "type", "macvlan")
 
 
 def ip_in(ns: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -93,8 +115,8 @@ def wait_for_route(ns: str, table: str, timeout: float = 20.0, poll: float = 0.5
     """Return True when the table contains at least one default route."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        out = route_show(ns, table)
-        if "default" in out:
+        r = ip_in(ns, "route", "show", "table", table, check=False)
+        if r.returncode == 0 and "default" in r.stdout.decode():
             return True
         time.sleep(poll)
     return False

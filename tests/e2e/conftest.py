@@ -28,6 +28,7 @@ pytestmark = [
 ]
 
 _HAVE_RADVD = bool(shutil.which("radvd"))
+_HOOK_PATH = str(Path(__file__).parent.parent.parent / "hooks" / "50-uplinkmgr")
 
 
 @dataclass
@@ -100,10 +101,13 @@ def topology(tmp_path):
         ns.link_up(r, "lo"); ns.link_up(r, topo.lan)
         ns.add_addr(r, topo.lan, f"{topo.lan_router_ip}/24")
         ns.link_up(r, topo.wan1); ns.link_up(r, topo.wan2)
+        ns.add_macvlan(r, topo.mv0, topo.lan)
+        ns.link_up(r, topo.mv0)
 
         ns.link_up(cli, "lo"); ns.link_up(cli, topo.lan_client)
         ns.add_addr(cli, topo.lan_client, f"{topo.lan_client_ip}/24")
         ns.add_route(cli, "default", topo.lan_router_ip)
+        ns.set_log_dir(tmp_path)
 
         yield topo
 
@@ -112,9 +116,46 @@ def topology(tmp_path):
             ns.delete_ns(name)
 
 
+def write_env_files(tmp_path: Path, topo: Topology) -> Path:
+    env_dir = tmp_path / "env"
+    env_dir.mkdir(exist_ok=True)
+    (env_dir / f"{topo.wan1}.env").write_text(
+        f"UPLINKMGR_UPLINK_NAME=isp1\n"
+        f"UPLINKMGR_WAN_IFACE={topo.wan1}\n"
+        f"UPLINKMGR_IPV6_PD=true\n"
+        f"UPLINKMGR_IPV6_IA_NA=true\n"
+    )
+    (env_dir / f"{topo.wan2}.env").write_text(
+        f"UPLINKMGR_UPLINK_NAME=isp2\n"
+        f"UPLINKMGR_WAN_IFACE={topo.wan2}\n"
+        f"UPLINKMGR_IPV6_PD=false\n"
+        f"UPLINKMGR_IPV6_IA_NA=false\n"
+    )
+    return env_dir
+
+
+def write_hook_runner(tmp_path: Path, env_dir: Path, state_dir: str) -> Path:
+    runner = tmp_path / "run-hooks"
+    runner.write_text(textwrap.dedent(f"""\
+        #!/bin/sh
+        export UPLINKMGR_ENV_DIR="{env_dir}"
+        export UPLINKMGR_STATE_DIR="{state_dir}"
+        UPLINKMGR_PID_FILE="${{UPLINKMGR_STATE_DIR}}/uplinkmgr.pid"
+        export UPLINKMGR_PID_FILE
+        export UPLINKMGR_HOOK_LOG="{state_dir}/hook.log"
+        . "{_HOOK_PATH}"
+    """))
+    runner.chmod(0o755)
+    return runner
+
+
 def write_dhcpcd_conf(tmp_path: Path, topo: Topology) -> Path:
+    env_dir = write_env_files(tmp_path, topo)
+    runner = write_hook_runner(tmp_path, env_dir, topo.state_dir)
     conf = tmp_path / "dhcpcd.conf"
     conf.write_text(textwrap.dedent(f"""\
+        script {runner}
+
         allowinterfaces {topo.wan1} {topo.mv0} {topo.wan2}
 
         interface {topo.wan1}
@@ -126,8 +167,6 @@ def write_dhcpcd_conf(tmp_path: Path, topo: Topology) -> Path:
 
         interface {topo.wan2}
             metric 200
-
-        hook /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr
     """))
     return conf
 

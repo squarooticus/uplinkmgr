@@ -102,11 +102,6 @@ def test_dhcpcd_allowinterfaces_wan_only_when_no_pd():
     assert "eth1-u0" not in out
 
 
-def test_dhcpcd_hook_line_present():
-    cfg = make_config()
-    assert "hook /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr" in dhcpcd_conf(cfg)
-
-
 # --- radvd_template_unit ---
 
 def test_radvd_template_unit_uses_percent_i():
