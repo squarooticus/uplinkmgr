@@ -264,7 +264,7 @@ All other fields take their defaults.
 It does **not** apply runtime changes (restart services, reload nftables, etc.). That is the administrator's responsibility after running the tool, or it is handled by the package scripts.
 
 **After re-running `uplinkmgr-setup`**, the administrator must restart affected services to pick up the new generated files:
-- `systemctl restart dhcpcd-uplinkmgr-<name>` for any uplink whose dhcpcd config changed (dhcpcd does not reload config on SIGHUP)
+- `systemctl restart dhcpcd` if the dhcpcd config changed (dhcpcd does not reload config on SIGHUP)
 - `systemctl restart radvd-uplinkmgr-<name>` or `systemctl kill --signal=SIGHUP radvd-uplinkmgr-<name>` for radvd (SIGHUP is sufficient unless lifetimes need refreshing)
 - `systemctl restart uplinkmgr` if the uplink list or monitoring parameters changed
 
@@ -655,7 +655,7 @@ On startup, the daemon:
 5. Performs an initial reconcile pass over all state files: installs IPv4 and IPv6 routes and all ip -6 rules that correspond to existing state files.
 6. Begins the monitoring loop immediately (no delay).
 
-The rationale for optimistic start: at boot, dhcpcd instances have been running and have configured routes before the daemon starts (see §12). The daemon should not deprovision anything until it has actually observed failures.
+The rationale for optimistic start: at boot, dhcpcd has been running and has configured routes before the daemon starts (see §12). The daemon should not deprovision anything until it has actually observed failures.
 
 The initial reconcile ensures that the daemon's in-memory tracking of installed routes and rules is accurate from startup, so subsequent SIGUSR1 and health-change events only apply the necessary delta.
 
@@ -1168,7 +1168,7 @@ The reference fragment masquerades all outbound traffic on WAN interfaces. Becau
 
 ### 9.1 Prefix Delegation Flow
 
-1. dhcpcd (per-uplink instance for `comcast`) sends a DHCPv6 PD request on `eth0`.
+1. dhcpcd (managing the `comcast` WAN interface `eth0`) sends a DHCPv6 PD request.
 2. The ISP assigns a prefix, e.g., `2001:db8:aaaa::/56`.
 3. dhcpcd sub-delegates:
    - `2001:db8:aaaa:0000::/64` → `vlan10-u0` (SLA ID 0)
@@ -1205,7 +1205,7 @@ This is **disabled by default** because it may cause unexpected failures with mi
 
 ### 9.5 Prefix Subdivision Invariant
 
-The SLA ID assignment is **fixed at config-file order** — it does not change if uplinks are added or removed. If the config changes (e.g., a new network is added), `uplinkmgr-setup` must be re-run and dhcpcd instances restarted to re-request PD with updated SLA IDs.
+The SLA ID assignment is **fixed at config-file order** — it does not change if uplinks are added or removed. If the config changes (e.g., a new network is added), `uplinkmgr-setup` must be re-run and dhcpcd restarted to re-request PD with updated SLA IDs.
 
 ---
 
@@ -1430,13 +1430,13 @@ Debian 13's `network-online.target` (and systemd's `wait-online` logic) will cau
 
 4. **`uplinkmgr.service` starts** (depends on `dhcpcd.service`). The daemon begins monitoring. At this point, routes are already configured; the daemon's initial state is `UP` for all uplinks.
 
-**Result:** IPv4 connectivity is available as soon as any dhcpcd instance obtains a lease (step 2), long before the daemon starts. Debian's boot does not time out waiting for the network.
+**Result:** IPv4 connectivity is available as soon as dhcpcd obtains a lease on any uplink interface (step 2), long before the daemon starts. Debian's boot does not time out waiting for the network.
 
 ### 12.3 Route Redundancy at Boot
 
 If both uplinks are functional at boot, both default routes are installed in the uplinkmgr table by the daemon's startup reconcile pass (once state files are present). The highest-priority uplink's route is selected by metric. The daemon, when it starts, confirms health and takes no deprovisioning action.
 
-If an uplink fails before the daemon starts, its dhcpcd instance either:
+If an uplink fails before the daemon starts, dhcpcd either:
 - Never obtains a lease (route never added), or
 - Obtains a lease and adds the route, then the daemon removes it after 3 failures.
 
@@ -1704,14 +1704,14 @@ However:
 1. **Interface name length:** All derived macvlan names must be ≤ 15 characters. `uplinkmgr-setup` enforces this.
 2. **Routing table number uniqueness:** Table numbers `[routing_table_start, routing_table_start + len(uplinks)]` must not conflict with any existing table definitions.
 3. **Uplink name uniqueness:** Uplink names must be unique. This is enforced at config parse time.
-4. **dhcpcd instance isolation:** Each per-uplink dhcpcd instance must only manage its designated interfaces (`allowinterfaces`). Running dhcpcd without this restriction on a multi-interface system will cause it to manage all interfaces, conflicting with other instances.
+4. **dhcpcd interface restriction:** The single dhcpcd instance uses `allowinterfaces` in the generated `/etc/dhcpcd.conf` to restrict management to exactly the WAN and macvlan interfaces listed by uplinkmgr-setup. This prevents dhcpcd from autonomously configuring any other interface on the system.
 5. **Hook idempotency:** The dhcpcd hook must be safe to run multiple times for the same event (e.g., RENEW after BOUND). It writes state files atomically (write to `<file>.tmp`, then `mv` to `<file>`) and signals the daemon; the daemon's reconcile logic is inherently idempotent (`ip route replace` is atomic; rules are only installed if not already present with the same parameters).
 6. **Daemon optimistic start:** The daemon must not deprovision uplinks at startup. Routes are assumed to be correctly configured by dhcpcd before the daemon starts.
 
 ### 16.2 Ordering Invariants
 
-- `uplinkmgr-setup` must be run before any dhcpcd or radvd instances are started (it generates their configs).
-- dhcpcd instances must be running before the uplinkmgr daemon starts (daemon reads state files written by the hook).
+- `uplinkmgr-setup` must be run before dhcpcd or any radvd instance is started (it generates their configs).
+- dhcpcd must be running before the uplinkmgr daemon starts (daemon reads state files written by the hook).
 - radvd instances must be running before clients attempt SLAAC (they need to receive RAs immediately on link-up).
 
 ### 16.3 Known Limitations
@@ -1723,8 +1723,7 @@ However:
 5. **radvd `prefix ::/64` fallback:** The initial radvd config (generated by `uplinkmgr-setup`) uses `prefix ::/64` as a placeholder until the first PD is received. If radvd cannot derive the delegated prefix automatically from the macvlan interface's assigned address, clients will not receive a useful prefix until the daemon regenerates the config after the first SIGUSR1 from the hook. This is a boot-time-only window.
 6. **Restart gap on lifetime refresh:** When the daemon restarts a radvd instance to apply fresh lifetimes (on SIGUSR1), there is a brief window (typically < 1 second) during which radvd is not sending RAs. Clients will not notice a gap this short. There is also a sub-second race between the daemon computing remaining lifetimes and radvd starting its countdown from those values, meaning advertised lifetimes may be very slightly longer than the upstream values.
 7. **Asymmetric uplink indices after config change:** If an uplink is removed from the middle of the `uplinks:` list, all subsequent uplinks' indices, MACs, link-locals, and routing table numbers change. This requires a full re-run of `uplinkmgr-setup`, restart of all affected services, and the administrator should be warned that existing client addresses become stale.
-8. **dhcpcd multi-instance removed in dhcpcd 11:** Starting with dhcpcd 11, running separate dhcpcd processes per interface is being removed in favor of a single daemon managing all interfaces ("manager mode", available since dhcpcd 5 but not yet mandatory). The replacement pattern is: start one dhcpcd daemon with `--deny-interfaces='*'`, then command it to adopt specific interfaces as needed. uplinkmgr's per-uplink systemd unit structure will need to be replaced with a single managed service unit, though `dhcpcd.conf` content remains compatible. Out of scope for this version (targets dhcpcd 10.1 on Debian 13 (Trixie)). See: https://github.com/NetworkConfiguration/dhcpcd/discussions/271
-9. **NAT not automatic:** `uplinkmgr-setup` generates a reference nftables fragment at `/etc/uplinkmgr/uplinkmgr-nat.nft.example` but does not apply it. The administrator is responsible for incorporating NAT rules into their firewall configuration.
+8. **NAT not automatic:** `uplinkmgr-setup` generates a reference nftables fragment at `/etc/uplinkmgr/uplinkmgr-nat.nft.example` but does not apply it. The administrator is responsible for incorporating NAT rules into their firewall configuration.
 
 ### 16.4 Security Considerations
 
@@ -1743,7 +1742,7 @@ The following items require verification against upstream documentation or testi
 | 1 | dhcpcd hook | ~~Exact variable names for IPv6 PD prefix, vltime, and pltime~~ **Confirmed:** PD variables are on the **WAN interface** BOUND6/RENEW6 event (not macvlan events): `$dhcp6_ia_pd1_prefix1`, `$dhcp6_ia_pd1_prefix1_length`, `$dhcp6_ia_pd1_prefix1_vltime`, `$dhcp6_ia_pd1_prefix1_pltime`. Delegated prefix length may be less than 64 (e.g. /60). | — |
 | 2 | dhcpcd hook | ~~Variable holding the RA source address and router lifetime for `ROUTERADVERT` events~~ **Confirmed:** `$nd1_from` (gateway / RA source address), `$nd1_lifetime` (router lifetime in seconds; note the state file key is `lifetime=`, not `nd1_lifetime=`). Also confirmed: `$nd1_flags` (flag characters including `M` for managed), `$nd1_addr1` (first SLAAC address), `$nd1_prefix_information1_prefix` (RA prefix address), `$nd1_prefix_information1_length` (RA prefix length). | — |
 | 3 | dhcpcd config | ~~`ia_pd` directive syntax~~ **Confirmed:** `ia_pd <IAID>/<requested-prefix>/<hint-length> <iface>/<SLA-ID>/64 ...` — e.g., `ia_pd 2/::/56 vlan10-u0/0/64 vlan20-u0/1/64`. `ia_na <IAID>` is also required to obtain an IPv6 address on the WAN interface. `ipv6rs` is needed to trigger ROUTERADVERT events. `duid` ensures consistent lease assignment. | — |
-| 4 | dhcpcd config | ~~`allowinterfaces` directive~~ **Confirmed:** `allowinterfaces` is correct in dhcpcd 10.x. Note: starting with dhcpcd 11, multi-instance support is expected to be removed in favor of a single-instance "manager mode"; this will require redesign if a future Debian target ships dhcpcd 11+. Out of scope for this spec (targets dhcpcd 10.1). | — |
+| 4 | dhcpcd config | ~~`allowinterfaces` directive~~ **Confirmed:** `allowinterfaces` is correct in dhcpcd 10.x. | — |
 | 5 | dhcpcd binary | ~~Correct path on Debian 13 (Trixie)~~ **Confirmed:** `/usr/sbin/dhcpcd`. | — |
 | 6 | dhcpcd binary | ~~Flags `--config`, `--pidfile`, `--nobackground` in dhcpcd 10.x~~ **Confirmed:** `--config` and `--nobackground` are correct. `--pidfile` is not accepted — dhcpcd writes its pid to `/run/dhcpcd/<iface>.pid` when an interface is given as a positional argument. Systemd unit updated accordingly. | — |
 | 7 | radvd | ~~Whether radvd re-reads config on SIGHUP~~ **Confirmed:** radvd re-reads config on SIGHUP (standard Unix daemon behavior; consistent with item 17 — counters continue from where they were). Note: dhcpcd does **not** support config reload via SIGHUP; `systemctl restart` is required when the dhcpcd config changes (only after re-running `uplinkmgr-setup`). | — |
@@ -1754,7 +1753,7 @@ The following items require verification against upstream documentation or testi
 | 12 | iproute2 | ~~Behavior when `ip route add` is called for a route that already exists~~ **Confirmed:** `ip route add` errors on a duplicate route. All route installation uses `ip route replace` throughout. | — |
 | 13 | kernel | ~~Behavior of `addr_gen_mode=1` set in `pre-up` — whether it persists after the interface is deleted and recreated~~ **Resolved:** set it unconditionally in every `pre-up` stanza regardless of prior state. | — |
 | 14 | ping | ~~Whether `ping6` is available separately or merged into `ping` on Debian 13's `iputils-ping`~~ **Confirmed:** `ping6` is provided by `iputils-ping`. | — |
-| 15 | dhcpcd | ~~Whether per-uplink dhcpcd instances conflict with a system-default dhcpcd instance~~ **Resolved:** they likely conflict; the system-default `dhcpcd.service` is disabled by `postinst` on install. There is no reason to run both. | — |
+| 15 | dhcpcd | ~~Whether running uplinkmgr's dhcpcd alongside a system-default dhcpcd instance would cause conflicts~~ **Resolved:** conflicts are avoided by design. uplinkmgr uses a single dhcpcd instance (the system `dhcpcd.service`) with `allowinterfaces` restricting it to uplinkmgr's interfaces. The system-default dhcpcd config is replaced by `postinst`; no separate per-uplink dhcpcd process is involved. | — |
 | 16 | iproute2 | ~~Whether `ip -6 route replace … expires <seconds>` is valid syntax for setting route expiry in iproute2 on Debian 13 (Trixie)~~ **Confirmed:** correct syntax. | — |
 | 17 | radvd | ~~Whether radvd resets `DecrementLifetimes` counters to the config-file values on SIGHUP, or continues counting from where they were~~ **Confirmed:** SIGHUP does not reset counters; they continue decrementing from where they were. Config values are only applied at (re)start. Daemon uses SIGHUP for preference changes and `systemctl restart` for lifetime refreshes. | — |
 
