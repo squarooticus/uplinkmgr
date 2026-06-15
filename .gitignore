@@ -23,3 +23,6 @@ debian/*.substvars
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Claude Code auto-memory system
+memory/
