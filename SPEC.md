@@ -679,8 +679,8 @@ iface vlan10-u0 inet manual
     pre-up ip link set vlan10-u0 address 52:00:00:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan10-u0.addr_gen_mode=1
     up ip link set vlan10-u0 up
-    up ip -6 addr add fe80::1:0 dev vlan10-u0 scope link
-    down ip -6 addr del fe80::1:0 dev vlan10-u0 scope link 2>/dev/null || true
+    up ip -6 addr add fe80::1:1 dev vlan10-u0 scope link
+    down ip -6 addr del fe80::1:1 dev vlan10-u0 scope link 2>/dev/null || true
     down ip link del vlan10-u0 2>/dev/null || true
 
 auto vlan20-u0
@@ -689,8 +689,8 @@ iface vlan20-u0 inet manual
     pre-up ip link set vlan20-u0 address 52:00:01:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan20-u0.addr_gen_mode=1
     up ip link set vlan20-u0 up
-    up ip -6 addr add fe80::1:0 dev vlan20-u0 scope link
-    down ip -6 addr del fe80::1:0 dev vlan20-u0 scope link 2>/dev/null || true
+    up ip -6 addr add fe80::1:1 dev vlan20-u0 scope link
+    down ip -6 addr del fe80::1:1 dev vlan20-u0 scope link 2>/dev/null || true
     down ip link del vlan20-u0 2>/dev/null || true
 
 auto vlan10-u1
@@ -699,8 +699,8 @@ iface vlan10-u1 inet manual
     pre-up ip link set vlan10-u1 address 52:01:00:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan10-u1.addr_gen_mode=1
     up ip link set vlan10-u1 up
-    up ip -6 addr add fe80::1:1 dev vlan10-u1 scope link
-    down ip -6 addr del fe80::1:1 dev vlan10-u1 scope link 2>/dev/null || true
+    up ip -6 addr add fe80::1:2 dev vlan10-u1 scope link
+    down ip -6 addr del fe80::1:2 dev vlan10-u1 scope link 2>/dev/null || true
     down ip link del vlan10-u1 2>/dev/null || true
 
 auto vlan20-u1
@@ -709,8 +709,8 @@ iface vlan20-u1 inet manual
     pre-up ip link set vlan20-u1 address 52:01:01:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan20-u1.addr_gen_mode=1
     up ip link set vlan20-u1 up
-    up ip -6 addr add fe80::1:1 dev vlan20-u1 scope link
-    down ip -6 addr del fe80::1:1 dev vlan20-u1 scope link 2>/dev/null || true
+    up ip -6 addr add fe80::1:2 dev vlan20-u1 scope link
+    down ip -6 addr del fe80::1:2 dev vlan20-u1 scope link 2>/dev/null || true
     down ip link del vlan20-u1 2>/dev/null || true
 ```
 
@@ -1012,9 +1012,9 @@ All macvlan interfaces for uplink index `N` (regardless of internal interface) g
 fe80::1:<N>
 ```
 
-- Uplink 0 → `fe80::1:0`
-- Uplink 1 → `fe80::1:1`
-- Uplink 2 → `fe80::1:2`
+- Uplink 0 → `fe80::1:1`
+- Uplink 1 → `fe80::1:2`
+- Uplink 2 → `fe80::1:3`
 
 The `1:` prefix groups all uplinkmgr-managed router addresses into a recognisable block, distinct from `fe80::1` (the internal interface's own link-local) and from EUI-64-derived addresses. By using distinct link-local addresses, clients that have multiple next-hop candidates can distinguish them at the IPv6 layer, enabling correct source address selection per RFC 6724 rule 5.5.
 
@@ -1173,29 +1173,29 @@ The reference fragment masquerades all outbound traffic on WAN interfaces. Becau
 3. dhcpcd sub-delegates:
    - `2001:db8:aaaa:0000::/64` → `vlan10-u0` (SLA ID 0)
    - `2001:db8:aaaa:0001::/64` → `vlan20-u0` (SLA ID 1)
-4. dhcpcd assigns the address `2001:db8:aaaa:0000::1:0/64` to `vlan10-u0` (using `fe80::1:0` as its link-local, the router address is formed from the interface's assigned global prefix + interface identifier from the link-local suffix... see verification item).
+4. dhcpcd assigns the address `2001:db8:aaaa:0000::1:0/64` to `vlan10-u0` (using `fe80::1:1` as its link-local, the router address is formed from the interface's assigned global prefix + interface identifier from the link-local suffix... see verification item).
 5. The dhcpcd hook runs and:
    - Adds `2001:db8:aaaa:0000::/64` to the per-uplink routing table via `vlan10-u0`
    - Adds `2001:db8:aaaa:0001::/64` to the per-uplink routing table via `vlan20-u0`
    - Installs ip -6 rules: `iif vlan10-u0 lookup uplinkmgr_comcast`
 6. radvd (comcast instance) reads the prefix from `vlan10-u0` and begins advertising:
    - Prefix `2001:db8:aaaa:0000::/64` on `vlan10-u0` with `AdvDefaultPreference high`
-   - Default route via `fe80::1:0` (the macvlan's link-local)
+   - Default route via `fe80::1:1` (the macvlan's link-local)
 
 ### 9.2 Client Behavior (RFC 6724 Rule 5.5)
 
 A client on `vlan10` receives RAs from:
 - `fe80::1` — the router's primary address, advertising ULA prefix (admin-configured)
-- `fe80::1:0` — `vlan10-u0`, advertising `2001:db8:aaaa:0000::/64` (comcast)
-- `fe80::1:1` — `vlan10-u1`, advertising `2001:db8:bbbb:0000::/64` (starlink, if IPv6-capable)
+- `fe80::1:1` — `vlan10-u0`, advertising `2001:db8:aaaa:0000::/64` (comcast)
+- `fe80::1:2` — `vlan10-u1`, advertising `2001:db8:bbbb:0000::/64` (starlink, if IPv6-capable)
 
 The client auto-configures multiple global addresses via SLAAC. When sending a packet, it selects the source address per RFC 6724. Rule 5.5 ("Prefer outgoing interface") causes the client to prefer a source address whose "default router" (next-hop) matches the outgoing interface. Since each router has a distinct MAC and link-local, the client can correctly associate each global address with its router and select the correct source address when a specific uplink is desired.
 
 ### 9.3 Policy Routing Enforcement
 
-When a packet arrives at `vlan10-u0` (sent by a client to `fe80::1:0`), the ip -6 rule `iif vlan10-u0 lookup uplinkmgr_comcast` directs it to the comcast routing table, ensuring it exits `eth0` regardless of the client's source address (as long as the packet arrived on the correct macvlan).
+When a packet arrives at `vlan10-u0` (sent by a client to `fe80::1:1`), the ip -6 rule `iif vlan10-u0 lookup uplinkmgr_comcast` directs it to the comcast routing table, ensuring it exits `eth0` regardless of the client's source address (as long as the packet arrived on the correct macvlan).
 
-This prevents a client that sends a packet to `fe80::1:0` (comcast router) from having the packet routed out `eth1` (starlink). It also means a client cannot accidentally use comcast's router as a default gateway for traffic that should use starlink.
+This prevents a client that sends a packet to `fe80::1:1` (comcast router) from having the packet routed out `eth1` (starlink). It also means a client cannot accidentally use comcast's router as a default gateway for traffic that should use starlink.
 
 ### 9.4 Optional Source Address Rejection
 

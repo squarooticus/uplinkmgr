@@ -85,11 +85,11 @@ def test_mac_address_max():
 # --- link_local ---
 
 def test_link_local_zero():
-    assert link_local(0) == "fe80::1:0"
+    assert link_local(0) == "fe80::1:1"
 
 
 def test_link_local_nonzero():
-    assert link_local(3) == "fe80::1:3"
+    assert link_local(3) == "fe80::1:4"
 
 
 # --- table numbers ---

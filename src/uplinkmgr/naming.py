@@ -45,7 +45,7 @@ def mac_address(uplink_idx: int, net_idx: int) -> str:
 
 def link_local(uplink_idx: int) -> str:
     """Return the link-local address for all macvlan interfaces of an uplink."""
-    return f"fe80::1:{uplink_idx}"
+    return f"fe80::1:{uplink_idx+1}"
 
 
 def ipv4_table_num(routing_table_start: int) -> int:

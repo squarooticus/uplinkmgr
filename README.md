@@ -194,9 +194,9 @@ MAC addresses and link-locals are deterministic and stable:
 
 | uplink index | network index | MAC                   | link-local    |
 |:---:|:---:|---|---|
-| 0 | 0 | `52:00:00:00:00:00` | `fe80::1:0`   |
-| 1 | 0 | `52:01:00:00:00:00` | `fe80::1:1`   |
-| 0 | 1 | `52:00:01:00:00:00` | `fe80::1:0`   |
+| 0 | 0 | `52:00:00:00:00:00` | `fe80::1:1`   |
+| 1 | 0 | `52:01:00:00:00:00` | `fe80::1:2`   |
+| 0 | 1 | `52:00:01:00:00:00` | `fe80::1:1`   |
 
 Macvlan names follow the pattern `<net-iface>-u<uplink-index>` (truncated to
 fit the 15-character kernel limit). Example: `vlan10-u0`, `vlan10-u1`.
@@ -247,8 +247,8 @@ macvlan to the corresponding uplink's table:
 ```
 
 This enforces source–path consistency: a packet that a client sends to
-`fe80::1:0` (the comcast macvlan's link-local) exits via `eth0` regardless
-of the client's source address. A client sending to `fe80::1:1` (starlink
+`fe80::1:1` (the comcast macvlan's link-local) exits via `eth0` regardless
+of the client's source address. A client sending to `fe80::1:2` (starlink
 macvlan) exits via `eth1`.
 
 A global suppression rule at the top of the IPv6 rule table prevents
