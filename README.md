@@ -276,9 +276,11 @@ uplinkmgr controls the `AdvDefaultPreference` field in each RA:
 When an uplink transitions to DOWN, the daemon:
 
 1. Rewrites the radvd config with `AdvDefaultPreference low`,
-   `AdvPreferredLifetime 0` (tells clients to stop using this prefix for new
-   connections), and `AdvValidLifetime 1800` (existing connections remain
-   valid for up to 30 minutes).
+   `AdvPreferredLifetime 0`, `AdvValidLifetime 0`, and
+   `DecrementLifetimes off`. Setting the valid lifetime to 0 immediately
+   invalidates the prefix. `DecrementLifetimes off` is required so that
+   radvd continues sending RAs with a zero valid lifetime rather than
+   silently stopping when the lifetime hits 0.
 2. Sends `SIGHUP` to the radvd instance so it re-reads the config.
 
 Clients with addresses from the failed uplink's prefix can finish existing

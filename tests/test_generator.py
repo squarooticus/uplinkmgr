@@ -148,7 +148,8 @@ def test_radvd_conf_from_state_is_down_zeroes_preferred_lifetime():
         is_down=True,
     )
     assert "AdvPreferredLifetime 0;" in out
-    assert "AdvValidLifetime 1800;" in out  # fixed fallback value when down
+    assert "AdvValidLifetime 0;" in out
+    assert "DecrementLifetimes off;" in out
 
 
 def test_radvd_conf_from_state_is_up_passes_through_lifetimes():

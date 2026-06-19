@@ -836,15 +836,15 @@ interface vlan20-u0
 | Uplink state | AdvDefaultPreference | AdvRoutePreference | AdvPreferredLifetime | AdvValidLifetime | AdvDefaultLifetime / AdvRouteLifetime |
 |-------------|---------------------|-------------------|---------------------|-----------------|--------------------------------------|
 | IPv6 UP | `high` or `medium` | `high` or `medium` | remaining pltime from state file | remaining vltime from state file | remaining lifetime from ipv6ra.state |
-| IPv6 DOWN | `low` | `low` | 0 | 1800 | remaining lifetime from ipv6ra.state |
+| IPv6 DOWN | `low` | `low` | 0 | 0 | remaining lifetime from ipv6ra.state |
 
 ("Remaining" values are `max(0, value - elapsed)` at the time the config is written; for freshly renewed leases this is approximately the full value.)
 
 When set to DOWN state:
 - `AdvPreferredLifetime 0` — immediately deprecates the prefix; clients will not form new connections using this source address.
-- `AdvValidLifetime 1800` — keeps the prefix valid (reachable) for 30 minutes, allowing existing connections to drain.
-- `AdvDefaultLifetime` and `AdvRouteLifetime` are **not** zeroed on DOWN — the router remains reachable as a last resort; only the prefix preference signals clients away.
-- `DecrementLifetimes on` is always present on prefix blocks regardless of uplink state.
+- `AdvValidLifetime 0` — immediately invalidates the prefix; clients discard SLAAC addresses derived from it.
+- `DecrementLifetimes off` — required when `AdvValidLifetime 0` so that radvd continues transmitting RAs with the zero lifetime rather than silently suppressing the prefix block. With `DecrementLifetimes on`, radvd would stop advertising a prefix whose remaining lifetime is 0, so clients would never receive the invalidating RA.
+- `AdvDefaultLifetime` and `AdvRouteLifetime` are **not** zeroed on DOWN — the router remains reachable as a last resort.
 
 ### 6.5 radvd systemd Units
 
@@ -1312,7 +1312,8 @@ Probes for different uplinks run **in parallel** using a `ThreadPoolExecutor` (o
    - `AdvDefaultPreference low`
    - `AdvRoutePreference low`
    - `AdvPreferredLifetime 0`
-   - `AdvValidLifetime 1800`
+   - `AdvValidLifetime 0`
+   - `DecrementLifetimes off`
    
    The regeneration algorithm for any given radvd config file:
    - Determine this uplink's state: DOWN.
@@ -1406,7 +1407,7 @@ def _derive_prefix_info(pd_state, uplink, now):
 
 Both `AdvDefaultLifetime` (the Router Lifetime field in the RA header) and `AdvRouteLifetime` (for the explicit `::/0` route block) are set to the **remaining `lifetime`** from `<uplink-name>.ipv6ra.state`. This propagates the upstream router's validity window directly to clients.
 
-`AdvDefaultLifetime` is **not** zeroed on downstate — the router remains reachable as a last resort. Only `AdvPreferredLifetime 0` is used to signal clients away from the failed uplink's prefix while preserving existing connections.
+`AdvDefaultLifetime` is **not** zeroed on downstate — the router remains reachable as a last resort. `AdvPreferredLifetime 0` and `AdvValidLifetime 0` together signal clients to immediately abandon addresses from the failed uplink's prefix. `DecrementLifetimes off` is set alongside `AdvValidLifetime 0` so that radvd keeps sending the invalidating RA rather than suppressing the prefix block once its lifetime reaches zero.
 
 ---
 
