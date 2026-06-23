@@ -48,7 +48,7 @@ def test_minimal_loads_and_applies_defaults(tmp_path):
 
     assert cfg.routing_table_start == DEFAULT_ROUTING_TABLE_START
     assert cfg.rule_priority_start == DEFAULT_RULE_PRIORITY_START
-    assert cfg.reject_incompatible_src is False
+    assert cfg.reject_wrong_pd_src is False
     assert cfg.radvd_min_restart_interval == DEFAULT_RADVD_MIN_RESTART_INTERVAL
     assert cfg.monitor.interval == DEFAULT_MONITOR_INTERVAL
     assert cfg.monitor.failure_threshold == DEFAULT_FAILURE_THRESHOLD
@@ -61,7 +61,7 @@ def test_all_options_explicit(tmp_path):
         uplinkmgr:
           routing_table_start: 100
           rule_priority_start: 20000
-          reject_incompatible_src: true
+          reject_wrong_pd_src: true
           radvd_min_restart_interval: 30
           monitor:
             interval: 5
@@ -82,7 +82,7 @@ def test_all_options_explicit(tmp_path):
 
     assert cfg.routing_table_start == 100
     assert cfg.rule_priority_start == 20000
-    assert cfg.reject_incompatible_src is True
+    assert cfg.reject_wrong_pd_src is True
     assert cfg.radvd_min_restart_interval == 30
     assert cfg.monitor.interval == 5
     assert cfg.monitor.failure_threshold == 2

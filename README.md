@@ -332,8 +332,8 @@ uplinkmgr:
   # Base priority for ip rule entries (must not conflict with other rules).
   rule_priority_start: 29000     # default
 
-  # If true, install prohibit rules rejecting cross-uplink source addresses.
-  reject_incompatible_src: false # default
+  # If true, prohibit macvlan traffic whose source is from a different uplink's PD prefix.
+  reject_wrong_pd_src: false    # default
 
   # Minimum seconds between radvd restarts (lifetime refresh rate limit).
   radvd_min_restart_interval: 60 # default

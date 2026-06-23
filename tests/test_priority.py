@@ -54,7 +54,7 @@ def test_ipv6_priority_ordering_and_uniqueness(n_uplinks, n_networks):
     ]
     lo_prios = [priority.ipv6_lo_to_uplink_priority(cfg, i) for i in range(n_uplinks)]
     prohibit_prios = [
-        priority.ipv6_prohibit_wrong_src_priority(cfg, ui, ni)
+        priority.ipv6_reject_wrong_pd_src_priority(cfg, ui, ni)
         for ui in range(n_uplinks)
         for ni in range(n_networks)
     ]

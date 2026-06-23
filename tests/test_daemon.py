@@ -160,11 +160,11 @@ class TestReconcileIPv6:
         r.del_ipv6_rule.assert_called()
         assert "eth1-u0" not in d._installed["isp"].macvlan_fwd
 
-    def test_reject_incompatible_src_installs_prohibit_rules(self, tmp_path):
+    def test_reject_wrong_pd_src_installs_prohibit_rules(self, tmp_path):
         cfg = make_config(
             networks=[make_network("lan", "eth1")],
             uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
-            reject_incompatible_src=True,
+            reject_wrong_pd_src=True,
         )
         write_state(tmp_path, "isp", "ipv6ra", {
             "gateway": "fe80::1", "lifetime": "0",
@@ -179,7 +179,7 @@ class TestReconcileIPv6:
         with patch("uplinkmgr.daemon.routing") as r:
             d._reconcile_uplink_ipv6(cfg.uplinks[0])
 
-        r.add_ipv6_prohibit_wrong_src_rule.assert_called_once()
+        r.add_ipv6_reject_wrong_pd_src_rule.assert_called_once()
 
     def test_ia_na_only_uplink_installs_route(self, tmp_path):
         cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0, ia_na=True, ipv6_pd=False)])

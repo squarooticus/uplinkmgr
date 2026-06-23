@@ -189,7 +189,7 @@ This file is installed as an example/default at package install time and is **no
 uplinkmgr:
   routing_table_start: 160      # first per-uplink routing table number (integer)
   rule_priority_start: 29000    # first ip -6 rule priority (integer)
-  reject_incompatible_src: false # add prohibit default to per-uplink tables (bool)
+  reject_wrong_pd_src: false    # prohibit macvlan traffic whose source is from a different uplink's PD prefix (bool)
   radvd_min_restart_interval: 60 # minimum seconds between radvd restarts on SIGUSR1 (integer, default: 60)
 
   monitor:
@@ -224,7 +224,7 @@ uplinkmgr:
 ### 4.3 Field Constraints
 
 - `routing_table_start`: Must be in the range 1–252 (default: 160). Avoid the well-known reserved IDs: 0=unspec, 253=default, 254=main, 255=local. Values above 255 are also valid kernel table numbers, but the default keeps table IDs in the single-byte range for readability in `ip route show table all` output. The range `[routing_table_start, routing_table_start + len(uplinks)]` (1 IPv4 table + one per uplink for IPv6) must not overlap with any table numbers already in `/etc/iproute2/rt_tables` or `/etc/iproute2/rt_tables.d/`.
-- `rule_priority_start`: Must leave room for all policy rules (see §7.5). Let `N = len(uplinks) * len(networks)`. IPv4 rules: `len(uplinks) + 2` (suppress + lo_to_uplink per uplink + fwd_to_wan). IPv6 rules: `1 + N + len(uplinks)` without `reject_incompatible_src`, `1 + 2*N + len(uplinks)` with it. Total with `reject_incompatible_src` on: `3 + 2*len(uplinks) + 2*N`. The configured range `[rule_priority_start, rule_priority_start + 99]` must not overlap any existing rules.
+- `rule_priority_start`: Must leave room for all policy rules (see §7.5). Let `N = len(uplinks) * len(networks)`. IPv4 rules: `len(uplinks) + 2` (suppress + lo_to_uplink per uplink + fwd_to_wan). IPv6 rules: `1 + N + len(uplinks)` without `reject_wrong_pd_src`, `1 + 2*N + len(uplinks)` with it. Total with `reject_wrong_pd_src` on: `3 + 2*len(uplinks) + 2*N`. The configured range `[rule_priority_start, rule_priority_start + 99]` must not overlap any existing rules.
 - `uplink.name`: Must consist only of alphanumeric characters and hyphens; must be unique across all uplinks.
 - `network.interface` and `uplink.interface`: Must be valid Linux interface names (max 15 chars). They are **not** validated against live interface existence by `uplinkmgr-setup` (the system may be configured before interfaces exist).
 - `uplink.metric`: If specified, must be a positive integer. If omitted, defaults to `100 * (uplink_index + 1)`.
@@ -518,7 +518,7 @@ The daemon monitors uplink health at regular intervals and manages all kernel ro
 - **IPv4 routes** in the shared `uplinkmgr` table: one default route per uplink with metric. Also a default route in each per-uplink table (metric 0) for use by the `lo_to_uplink` rule.
 - **IPv4 `lo_to_uplink` rules**: per-uplink `ip rule add from <wan-ip> lookup <per-uplink-table>`; routes router-originated traffic bound to a specific WAN IP via the correct uplink.
 - **IPv6 routes** in per-uplink tables: one default route per IPv6 uplink (with expiry); installed on SIGUSR1 when the `ipv6ra.state` file is present, removed when absent.
-- **ip -6 rules**: per-macvlan `fwd_to_uplink`, per-uplink `lo_to_uplink`, and (optionally) `prohibit_wrong_src` rules; installed/removed as state files appear/disappear.
+- **ip -6 rules**: per-macvlan `fwd_to_uplink`, per-uplink `lo_to_uplink`, and (optionally) `reject_wrong_pd_src` rules; installed/removed as state files appear/disappear.
 - **radvd configurations**: updating AdvDefaultPreference and prefix lifetimes based on IPv6 uplink state; restarted on SIGUSR1 (rate-limited) for lifetime refresh, SIGHUPed on health state changes for preference updates.
 
 The hook is responsible only for writing state files and signalling the daemon. All routing and rule management is centralized in the daemon, eliminating race conditions between the hook and daemon.
@@ -1046,11 +1046,11 @@ Let `N = len(uplinks) * len(networks)`, `M = len(networks)`.
 **IPv6 rules** (`ip -6 rule` — separate priority namespace from IPv4):
 
 - `rule_priority_start + 0` (`ipv6_internal_traffic`): `lookup main suppress_prefixlength 0` — **single global rule**; installed at startup; replaces the old per-macvlan suppress rules.
-- `rule_priority_start + 1 + uplink_idx * M + net_idx` (`ipv6_fwd_to_uplink`): per macvlan; `reject_incompatible_src` off: `iif <macvlan> lookup <table>`; on: `from <delegated-prefix>/<len> iif <macvlan> lookup <table>`.
+- `rule_priority_start + 1 + uplink_idx * M + net_idx` (`ipv6_fwd_to_uplink`): per macvlan; `reject_wrong_pd_src` off: `iif <macvlan> lookup <table>`; on: `from <delegated-prefix>/<len> iif <macvlan> lookup <table>`.
 - `rule_priority_start + 1 + N + uplink_idx` (`ipv6_lo_to_uplink`): `from <prefix> iif lo lookup <table>`. For managed networks: `from <ia_na_addr>/128`; for SLAAC networks: `from <ra_prefix>/<ra_plen>` (covers all kernel-assigned addresses from the RA prefix, including privacy addresses). Installed when state is known and uplink is UP.
-- `rule_priority_start + 1 + N + len(uplinks) + uplink_idx * M + net_idx` (`ipv6_prohibit_wrong_src`): `iif <macvlan> prohibit` — only when `reject_incompatible_src: true`.
+- `rule_priority_start + 1 + N + len(uplinks) + uplink_idx * M + net_idx` (`ipv6_reject_wrong_pd_src`): `iif <macvlan> prohibit` — only when `reject_wrong_pd_src: true`.
 
-Example with 2 uplinks (`comcast`=0, `starlink`=1), 2 networks, `reject_incompatible_src: true`, `rule_priority_start`=29000 (N=4, M=2):
+Example with 2 uplinks (`comcast`=0, `starlink`=1), 2 networks, `reject_wrong_pd_src: true`, `rule_priority_start`=29000 (N=4, M=2):
 
 ```
 # ip rule show (IPv4)
@@ -1067,7 +1067,7 @@ Example with 2 uplinks (`comcast`=0, `starlink`=1), 2 networks, `reject_incompat
 29004:  from <starlink-pd>/48 iif vlan20-u1 lookup 162
 29005:  from <comcast-ia-na>/128 iif lo lookup 161           (ipv6_lo_to_uplink, managed)
 29006:  from <starlink-prefix>/64 iif lo lookup 162          (ipv6_lo_to_uplink, SLAAC)
-29007:  iif vlan10-u0 prohibit                               (ipv6_prohibit_wrong_src)
+29007:  iif vlan10-u0 prohibit                               (ipv6_reject_wrong_pd_src)
 29008:  iif vlan20-u0 prohibit
 29009:  iif vlan10-u1 prohibit
 29010:  iif vlan20-u1 prohibit
@@ -1197,11 +1197,13 @@ When a packet arrives at `vlan10-u0` (sent by a client to `fe80::1:1`), the ip -
 
 This prevents a client that sends a packet to `fe80::1:1` (comcast router) from having the packet routed out `eth1` (starlink). It also means a client cannot accidentally use comcast's router as a default gateway for traffic that should use starlink.
 
-### 9.4 Optional Source Address Rejection
+### 9.4 Optional Wrong-PD Source Rejection
 
-If `reject_incompatible_src: true`, the `fwd_to_uplink` rule is narrowed to `from <delegated-prefix>/<len> iif <macvlan>` (matching only traffic whose source address belongs to that uplink's delegated prefix), and a `prohibit_wrong_src` catch-all rule (`iif <macvlan> prohibit`) is installed at a lower priority. Traffic that arrives on a macvlan with a source address from a different uplink's prefix matches the catch-all and receives an ICMPv6 Destination Unreachable (code 1, "no route") response. This prevents cross-contamination of source addresses between uplinks.
+If `reject_wrong_pd_src: true`, the `fwd_to_uplink` rule is narrowed to `from <delegated-prefix>/<len> iif <macvlan>` (matching only traffic whose source address belongs to that uplink's delegated prefix), and an `ipv6_reject_wrong_pd_src` catch-all rule (`iif <macvlan> prohibit`) is installed at a lower priority. Traffic that arrives on a macvlan with a source address from a different uplink's prefix matches the catch-all and receives an ICMPv6 Destination Unreachable (code 1, "no route") response. This prevents clients from sending traffic to one uplink's router using a source address from a different uplink's prefix delegation.
 
 This is **disabled by default** because it may cause unexpected failures with misconfigured clients and is conservative to enable.
+
+**Connectivity loss on dual-uplink failure:** When `reject_wrong_pd_src: true`, the `ipv6_reject_wrong_pd_src` rules remain installed as long as the uplink's `ipv6pd.state` file is present — they are not removed when the daemon declares an uplink DOWN. If uplinkmgr incorrectly marks both uplinks DOWN (e.g., false-positive probe failures, or the daemon itself stops), traffic from internal clients whose source addresses belong to either uplink's delegated prefix will be prohibited at the macvlan, rather than falling through to dhcpcd's default routes in the main table. This eliminates the best-effort fallback that `reject_wrong_pd_src: false` provides. Administrators who rely on partial connectivity during uplink failures or uplinkmgr restarts should leave this option disabled.
 
 ### 9.5 Prefix Subdivision Invariant
 
@@ -1333,7 +1335,7 @@ Probes for different uplinks run **in parallel** using a `ThreadPoolExecutor` (o
    systemctl kill --signal=SIGHUP radvd-uplinkmgr-<name>.service
    ```
 
-4. Optionally (if `reject_incompatible_src`): The prohibit_wrong_src rules are managed by the daemon based on state file presence; no additional action needed here.
+4. Optionally (if `reject_wrong_pd_src`): The `ipv6_reject_wrong_pd_src` rules are managed by the daemon based on state file presence; no additional action needed here.
 
 5. Log the event: `uplink <name> IPv6 DOWN`.
 
@@ -1465,7 +1467,7 @@ When the daemon receives SIGTERM (or is stopped by `systemctl stop uplinkmgr`):
    - Remove all IPv4 `lo_to_uplink` rules.
    - Remove the two global IPv4 policy rules (`suppress_prefixlength 0` and `lookup uplinkmgr`).
    - Remove all IPv6 default routes from per-uplink tables.
-   - Remove all ip -6 rules (`fwd_to_uplink`, `lo_to_uplink`, optionally `prohibit_wrong_src`).
+   - Remove all ip -6 rules (`fwd_to_uplink`, `lo_to_uplink`, optionally `ipv6_reject_wrong_pd_src`).
    - Remove the global IPv6 policy rule (`lookup main suppress_prefixlength 0`).
 
 2. **Regenerate all radvd configs to "everything up" state:** Regenerate all radvd config files as if all IPv6 uplinks are UP. Assign preference tiers by uplink priority (index 0 = high, others = medium). Write all configs atomically.

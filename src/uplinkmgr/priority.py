@@ -36,7 +36,7 @@ def ipv4_fwd_to_wan_priority(cfg: "Config") -> int:
 # rule_priority_start + 0                        ipv6_internal_traffic_priority  (global)
 # rule_priority_start + 1 + uplink*M + net       ipv6_fwd_to_uplink_priority
 # rule_priority_start + 1 + N + idx              ipv6_lo_to_uplink_priority
-# rule_priority_start + 1 + N + n_uplinks + ..   ipv6_prohibit_wrong_src_priority
+# rule_priority_start + 1 + N + n_uplinks + ..   ipv6_reject_wrong_pd_src_priority
 # ---------------------------------------------------------------------------
 
 def ipv6_internal_traffic_priority(cfg: "Config") -> int:
@@ -52,7 +52,7 @@ def ipv6_lo_to_uplink_priority(cfg: "Config", uplink_idx: int) -> int:
     return cfg.rule_priority_start + 1 + N + uplink_idx
 
 
-def ipv6_prohibit_wrong_src_priority(cfg: "Config", uplink_idx: int, net_idx: int) -> int:
+def ipv6_reject_wrong_pd_src_priority(cfg: "Config", uplink_idx: int, net_idx: int) -> int:
     N = len(cfg.uplinks) * len(cfg.networks)
     return (cfg.rule_priority_start + 1 + N + len(cfg.uplinks)
             + uplink_idx * len(cfg.networks) + net_idx)

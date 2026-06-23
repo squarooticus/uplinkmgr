@@ -41,7 +41,7 @@ def make_config(networks=None, uplinks=None, **kwargs) -> Config:
     return Config(
         routing_table_start=kwargs.get("routing_table_start", DEFAULT_ROUTING_TABLE_START),
         rule_priority_start=kwargs.get("rule_priority_start", DEFAULT_RULE_PRIORITY_START),
-        reject_incompatible_src=kwargs.get("reject_incompatible_src", False),
+        reject_wrong_pd_src=kwargs.get("reject_wrong_pd_src", False),
         radvd_min_restart_interval=kwargs.get("radvd_min_restart_interval",
                                                DEFAULT_RADVD_MIN_RESTART_INTERVAL),
         monitor=kwargs.get("monitor", make_monitor()),

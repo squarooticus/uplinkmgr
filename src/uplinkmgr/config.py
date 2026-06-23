@@ -59,7 +59,7 @@ class UplinkConfig:
 class Config:
     routing_table_start: int
     rule_priority_start: int
-    reject_incompatible_src: bool
+    reject_wrong_pd_src: bool
     radvd_min_restart_interval: int
     monitor: MonitorConfig
     networks: list[NetworkConfig]
@@ -92,7 +92,7 @@ def load(path: str = DEFAULT_CONFIG_PATH) -> Config:
 
     routing_table_start = int(top.get("routing_table_start", DEFAULT_ROUTING_TABLE_START))
     rule_priority_start = int(top.get("rule_priority_start", DEFAULT_RULE_PRIORITY_START))
-    reject_incompatible_src = bool(top.get("reject_incompatible_src", False))
+    reject_wrong_pd_src = bool(top.get("reject_wrong_pd_src", False))
     radvd_min_restart_interval = int(top.get("radvd_min_restart_interval",
                                               DEFAULT_RADVD_MIN_RESTART_INTERVAL))
 
@@ -119,7 +119,7 @@ def load(path: str = DEFAULT_CONFIG_PATH) -> Config:
     return Config(
         routing_table_start=routing_table_start,
         rule_priority_start=rule_priority_start,
-        reject_incompatible_src=reject_incompatible_src,
+        reject_wrong_pd_src=reject_wrong_pd_src,
         radvd_min_restart_interval=radvd_min_restart_interval,
         monitor=monitor,
         networks=networks,

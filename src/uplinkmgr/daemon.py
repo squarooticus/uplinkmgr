@@ -408,7 +408,7 @@ class Daemon:
         cfg = self._cfg
         # fwd_to_uplink uses the full delegated prefix as the from-constraint
         delegated = (f"{ipv6pd_st.delegated_prefix}/{ipv6pd_st.delegated_length}"
-                     if cfg.reject_incompatible_src else None)
+                     if cfg.reject_wrong_pd_src else None)
 
         for net_idx, net in enumerate(cfg.networks):
             mv = naming.macvlan_name(net.interface, uplink.index)
@@ -424,12 +424,12 @@ class Daemon:
                 routing.add_ipv6_fwd_to_uplink_rule(mv, ipv6_tbl, fwd_prio, delegated)
                 installed.macvlan_fwd[mv] = delegated
 
-            if cfg.reject_incompatible_src:
-                prohibit_prio = priority.ipv6_prohibit_wrong_src_priority(
+            if cfg.reject_wrong_pd_src:
+                prohibit_prio = priority.ipv6_reject_wrong_pd_src_priority(
                     cfg, uplink.index, net_idx
                 )
                 if mv not in installed.macvlan_prohibit:
-                    routing.add_ipv6_prohibit_wrong_src_rule(mv, prohibit_prio)
+                    routing.add_ipv6_reject_wrong_pd_src_rule(mv, prohibit_prio)
                     installed.macvlan_prohibit.add(mv)
 
     def _teardown_macvlan_rules(self, uplink: UplinkConfig,
@@ -444,7 +444,7 @@ class Daemon:
                 del installed.macvlan_fwd[mv]
             if mv in installed.macvlan_prohibit:
                 routing.del_ipv6_rule(
-                    priority.ipv6_prohibit_wrong_src_priority(cfg, uplink.index, net_idx)
+                    priority.ipv6_reject_wrong_pd_src_priority(cfg, uplink.index, net_idx)
                 )
                 installed.macvlan_prohibit.discard(mv)
 

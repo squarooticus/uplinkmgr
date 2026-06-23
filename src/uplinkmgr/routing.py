@@ -90,7 +90,7 @@ def add_ipv6_fwd_to_uplink_rule(mv: str, table: int, priority: int,
     _run(cmd)
 
 
-def add_ipv6_prohibit_wrong_src_rule(mv: str, priority: int) -> None:
+def add_ipv6_reject_wrong_pd_src_rule(mv: str, priority: int) -> None:
     _run(["ip", "-6", "rule", "add",
           "iif", mv, "prohibit", "priority", str(priority)])
 
