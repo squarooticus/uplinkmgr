@@ -114,7 +114,6 @@ def radvd_conf(cfg: Config, uplink: UplinkConfig) -> str:
             prefix="::/64",
             valid_lifetime=INITIAL_VALID_LIFETIME,
             preferred_lifetime=INITIAL_PREFERRED_LIFETIME,
-            decrement_lifetimes="on",
         )
     return "\n".join(lines) + "\n"
 
@@ -141,7 +140,6 @@ def radvd_conf_from_state(
         prefix = per_iface_prefixes.get(mv, "::/64")
         eff_preferred = 0 if is_down else preferred_lifetime
         eff_valid = 0 if is_down else valid_lifetime
-        decrement_lifetimes = "off" if is_down else "on"
         lines += _radvd_interface_block(
             iface=mv,
             preference=preference,
@@ -150,7 +148,6 @@ def radvd_conf_from_state(
             prefix=prefix,
             valid_lifetime=eff_valid,
             preferred_lifetime=eff_preferred,
-            decrement_lifetimes=decrement_lifetimes,
         )
     return "\n".join(lines) + "\n"
 
@@ -163,7 +160,6 @@ def _radvd_interface_block(
     prefix: str,
     valid_lifetime: int,
     preferred_lifetime: int,
-    decrement_lifetimes: str,
 ) -> list[str]:
     return [
         f"interface {iface}",
@@ -185,7 +181,7 @@ def _radvd_interface_block(
         "        AdvRouterAddr on;",
         f"        AdvValidLifetime {valid_lifetime};",
         f"        AdvPreferredLifetime {preferred_lifetime};",
-        f"        DecrementLifetimes {decrement_lifetimes};",
+        "        DecrementLifetimes off;",
         "    };",
         "",
         "    RDNSS { };",

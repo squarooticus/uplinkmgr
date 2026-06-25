@@ -71,6 +71,14 @@ def regenerate_all(
             valid_lifetime = generator.INITIAL_VALID_LIFETIME
             preferred_lifetime = generator.INITIAL_PREFERRED_LIFETIME
 
+        is_dispreferred = (
+            cfg.exclusive_preferred_pd
+            and not is_down
+            and not (up_uplinks and up_uplinks[0].name == uplink.name)
+        )
+        if is_dispreferred:
+            preferred_lifetime = 0
+
         per_iface_prefixes = _derive_prefixes(cfg, uplink, pd_state)
 
         conf_text = generator.radvd_conf_from_state(

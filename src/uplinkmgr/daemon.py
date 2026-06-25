@@ -47,8 +47,8 @@ class Daemon:
         self._ipv6_rule_installed: bool = False
         self._reload_requested = False
         self._reconcile_requested = False
-        self._radvd_restart_requested = False
-        self._last_radvd_restart: float = 0.0
+        self._radvd_sighup_requested = False
+        self._last_radvd_sighup: float = 0.0
         self._running = True
         self._executor: Optional[ThreadPoolExecutor] = None
 
@@ -76,8 +76,8 @@ class Daemon:
             if self._reload_requested:
                 self._do_reload()
 
-            if self._radvd_restart_requested:
-                self._do_radvd_restart()
+            if self._radvd_sighup_requested:
+                self._do_radvd_sighup()
 
             if self._reconcile_requested:
                 self._do_reconcile()
@@ -97,7 +97,7 @@ class Daemon:
         """Sleep, but wake early on SIGUSR1, SIGUSR2, or SIGHUP."""
         deadline = time.monotonic() + seconds
         while (self._running and not self._reload_requested
-               and not self._reconcile_requested and not self._radvd_restart_requested):
+               and not self._reconcile_requested and not self._radvd_sighup_requested):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -126,7 +126,7 @@ class Daemon:
         self._reconcile_requested = True
 
     def _handle_usr2(self, signum, frame) -> None:
-        self._radvd_restart_requested = True
+        self._radvd_sighup_requested = True
 
     # ------------------------------------------------------------------
     # Reload
@@ -149,20 +149,20 @@ class Daemon:
         log.info("config reloaded; all uplink states reset to UP")
 
     # ------------------------------------------------------------------
-    # SIGUSR1 — reconcile routing, rate-limited radvd restart
-    # SIGUSR2 — unconditional radvd restart (admin override)
+    # SIGUSR1 — reconcile routing, rate-limited radvd SIGHUP
+    # SIGUSR2 — unconditional radvd SIGHUP (admin override)
     # ------------------------------------------------------------------
 
-    def _do_radvd_restart(self) -> None:
-        self._radvd_restart_requested = False
-        log.debug("SIGUSR2: unconditional radvd restart")
+    def _do_radvd_sighup(self) -> None:
+        self._radvd_sighup_requested = False
+        log.debug("SIGUSR2: unconditional radvd sighup")
         radvd.regenerate_all(
             cfg=self._cfg,
             states=self._states,
             state_dir=self._state_dir,
-            action="restart",
+            action="sighup",
         )
-        self._last_radvd_restart = time.monotonic()
+        self._last_radvd_sighup = time.monotonic()
 
     def _do_reconcile(self) -> None:
         self._reconcile_requested = False
@@ -170,22 +170,22 @@ class Daemon:
 
         min_interval = self._cfg.radvd_min_restart_interval
         now_mono = time.monotonic()
-        elapsed = now_mono - self._last_radvd_restart
+        elapsed = now_mono - self._last_radvd_sighup
         min_remaining = self._min_gw_remaining()
 
         if (elapsed >= min_interval
                 or (min_remaining is not None and min_remaining <= min_interval)):
-            log.debug("SIGUSR1: restarting radvd (elapsed=%.0fs, min_gw_remaining=%s)",
+            log.debug("SIGUSR1: sighuping radvd (elapsed=%.0fs, min_gw_remaining=%s)",
                       elapsed, min_remaining)
             radvd.regenerate_all(
                 cfg=self._cfg,
                 states=self._states,
                 state_dir=self._state_dir,
-                action="restart",
+                action="sighup",
             )
-            self._last_radvd_restart = now_mono
+            self._last_radvd_sighup = now_mono
         else:
-            log.debug("SIGUSR1: skipping radvd restart "
+            log.debug("SIGUSR1: skipping radvd sighup "
                       "(elapsed=%.0fs < interval=%ds, min_gw_remaining=%s)",
                       elapsed, min_interval, min_remaining)
             radvd.regenerate_all(

@@ -190,6 +190,7 @@ uplinkmgr:
   routing_table_start: 160      # first per-uplink routing table number (integer)
   rule_priority_start: 29000    # first ip -6 rule priority (integer)
   reject_wrong_pd_src: false    # prohibit macvlan traffic whose source is from a different uplink's PD prefix (bool)
+  exclusive_preferred_pd: false # set AdvPreferredLifetime 0 on all but the highest-priority UP uplink (bool)
   radvd_min_restart_interval: 60 # minimum seconds between radvd restarts on SIGUSR1 (integer, default: 60)
 
   monitor:
@@ -579,30 +580,23 @@ When the desired gateway differs from the installed state:
 
 #### 5.3.5 radvd Config Regeneration
 
-radvd's `DecrementLifetimes` counters **are not reset on SIGHUP** — they continue from where they were. Config file lifetime values are only applied when radvd starts fresh (at service start or `systemctl restart`). This determines when to SIGHUP vs. restart:
+All radvd config updates use SIGHUP, not `systemctl restart`. This is possible because radvd advertises `min(configured_lifetime, address_lifetime)` for any prefix that has a matching address on the interface. Since dhcpcd sub-delegates a /64 from the PD prefix to each macvlan and keeps that address's preferred/valid lifetimes current, radvd automatically reads the correct remaining lifetimes from the kernel on each RA it sends and on each SIGHUP. The `DecrementLifetimes` internal counter is never needed, so the daemon sets `DecrementLifetimes off` in all generated radvd configs.
 
 | Trigger | Action | Why |
 |---------|--------|-----|
-| Uplink state change (UP↔DOWN) | SIGHUP | Only preference tier changes; radvd's live counters are already accurate |
-| SIGUSR1 from hook (new PD or RA data) | `systemctl restart` (rate-limited) or config write only | Fresh lifetimes needed, but some ISPs send RAs every few seconds; rate limiting prevents excessive restarts |
-| SIGUSR2 (admin/unconditional) | `systemctl restart` | Bypass rate limiting; admin-triggered or for testing |
+| Uplink state change (UP↔DOWN) | SIGHUP | Updates preference tier and lifetime config; radvd re-reads interface address lifetimes |
+| SIGUSR1 from hook (new PD or RA data) | SIGHUP (rate-limited) or config write only | Interface address lifetime is already accurate; SIGHUP causes radvd to send fresh RAs immediately |
+| SIGUSR2 (admin/unconditional) | SIGHUP | Bypass rate limiting; forces immediate RA with current state |
 
 In all cases the daemon first regenerates the config for **all** IPv6 uplinks (a state change can affect other uplinks' preference tiers), then takes the appropriate action.
 
-**For SIGHUP** (state change): the daemon writes configs with accurate remaining lifetimes (for correctness at next restart), then SIGHUPs each radvd instance. radvd picks up only the preference change; its live counters continue unaffected.
-
-**For restart** (SIGUSR1 or SIGUSR2): the daemon reads all state files and computes remaining lifetimes (`max(0, value - (now - timestamp))`), writes configs, then restarts radvd instances:
-```python
-subprocess.run(['systemctl', 'restart', f'radvd-uplinkmgr-{name}.service'])
-```
-
-**SIGUSR1 rate limiting:** Many ISPs (notably Spectrum) send Router Advertisements at very short intervals (as frequently as once every 2 seconds). Without rate limiting, every RA event from the dhcpcd hook would trigger a full radvd restart. The `radvd_min_restart_interval` config option (default: 60s) controls the minimum time between radvd restarts triggered by SIGUSR1.
+**SIGUSR1 rate limiting:** Many ISPs (notably Spectrum) send Router Advertisements at very short intervals (as frequently as once every 2 seconds). Without rate limiting, every RA event from the dhcpcd hook would trigger a SIGHUP. The `radvd_min_restart_interval` config option (default: 60s) controls the minimum time between radvd SIGHUPs triggered by SIGUSR1.
 
 On each SIGUSR1, the daemon checks two conditions:
-1. **Elapsed time:** seconds since the last radvd restart ≥ `radvd_min_restart_interval`
-2. **Lifetime urgency:** the minimum remaining upstream RA lifetime across all IPv6 uplinks ≤ `radvd_min_restart_interval` (prevents the config from going stale when the gateway lifetime is short)
+1. **Elapsed time:** seconds since the last radvd SIGHUP ≥ `radvd_min_restart_interval`
+2. **Lifetime urgency:** the minimum remaining upstream RA lifetime across all IPv6 uplinks ≤ `radvd_min_restart_interval` (ensures radvd picks up config changes promptly when the gateway lifetime is short)
 
-If either condition is true, radvd is restarted and `_last_radvd_restart` is updated. Otherwise the config files are written (so they stay accurate for the next restart or SIGHUP), but radvd is not restarted, and a debug-level log message records the skip.
+If either condition is true, radvd is SIGHUPed and `_last_radvd_sighup` is updated. Otherwise the config files are written (so they stay accurate for the next SIGHUP), but radvd is not signalled, and a debug-level log message records the skip.
 
 Uplinks with `lifetime = 0` in `ipv6ra.state` (infinite router lifetime) are excluded from the lifetime urgency check.
 
@@ -793,7 +787,7 @@ interface vlan10-u0
         AdvRouterAddr on;
         AdvValidLifetime 86100;     # remaining vltime: 86400 - 300
         AdvPreferredLifetime 14100; # remaining pltime: 14400 - 300
-        DecrementLifetimes on;
+        DecrementLifetimes off;
     };
 
     RDNSS { };
@@ -819,7 +813,7 @@ interface vlan20-u0
         AdvRouterAddr on;
         AdvValidLifetime 86100;
         AdvPreferredLifetime 14100;
-        DecrementLifetimes on;
+        DecrementLifetimes off;
     };
 
     RDNSS { };
@@ -827,7 +821,7 @@ interface vlan20-u0
 };
 ```
 
-**Initial config (generated by `uplinkmgr-setup` before PD has occurred):** Uses safe placeholder values — `AdvValidLifetime 7200`, `AdvPreferredLifetime 1800`, `AdvDefaultLifetime 1800`, `AdvRouteLifetime 1800` — with `DecrementLifetimes on`. These are conservative values that will not cause clients to cache stale state for long before the daemon regenerates the config on first PD receipt.
+**Initial config (generated by `uplinkmgr-setup` before PD has occurred):** Uses safe placeholder values — `AdvValidLifetime 7200`, `AdvPreferredLifetime 1800`, `AdvDefaultLifetime 1800`, `AdvRouteLifetime 1800` — with `DecrementLifetimes off`. The placeholder prefix `::/64` will not match any address on the macvlan (no PD has occurred yet), so radvd does not advertise valid prefix information until the daemon regenerates the config on first PD receipt.
 
 > **Verification item:** Confirm whether radvd on Debian 13 (Trixie) supports the `AdvRouterAddr on` directive to automatically use the macvlan's assigned global address as the router address, and whether `prefix ::/64` with `AdvRouterAddr on` causes it to advertise the delegated /64 automatically when dhcpcd assigns it. If not, the daemon must write the explicit prefix (computed from `<uplink>.ipv6pd.state` using the SLA ID) into the radvd config on each PD assignment. See §17.
 
@@ -835,15 +829,19 @@ interface vlan20-u0
 
 | Uplink state | AdvDefaultPreference | AdvRoutePreference | AdvPreferredLifetime | AdvValidLifetime | AdvDefaultLifetime / AdvRouteLifetime |
 |-------------|---------------------|-------------------|---------------------|-----------------|--------------------------------------|
-| IPv6 UP | `high` or `medium` | `high` or `medium` | remaining pltime from state file | remaining vltime from state file | remaining lifetime from ipv6ra.state |
+| IPv6 UP, primary | `high` | `high` | remaining pltime from state file | remaining vltime from state file | remaining lifetime from ipv6ra.state |
+| IPv6 UP, non-primary (`exclusive_preferred_pd: false`) | `medium` | `medium` | remaining pltime from state file | remaining vltime from state file | remaining lifetime from ipv6ra.state |
+| IPv6 UP, non-primary (`exclusive_preferred_pd: true`) | `medium` | `medium` | **0** | remaining vltime from state file | remaining lifetime from ipv6ra.state |
 | IPv6 DOWN | `low` | `low` | 0 | 0 | remaining lifetime from ipv6ra.state |
 
 ("Remaining" values are `max(0, value - elapsed)` at the time the config is written; for freshly renewed leases this is approximately the full value.)
 
+**`DecrementLifetimes off` is always set** (for UP and DOWN uplinks). radvd advertises `min(configured_lifetime, address_lifetime_on_interface)` — since dhcpcd keeps the macvlan address lifetimes current, radvd tracks remaining lifetimes automatically. The configured values act as upper bounds; the interface address is the actual countdown.
+
 When set to DOWN state:
-- `AdvPreferredLifetime 0` — immediately deprecates the prefix; clients will not form new connections using this source address.
-- `AdvValidLifetime 0` — immediately invalidates the prefix; clients discard SLAAC addresses derived from it.
-- `DecrementLifetimes off` — required when `AdvValidLifetime 0` so that radvd continues transmitting RAs with the zero lifetime rather than silently suppressing the prefix block. With `DecrementLifetimes on`, radvd would stop advertising a prefix whose remaining lifetime is 0, so clients would never receive the invalidating RA.
+- `AdvPreferredLifetime 0` — `min(0, anything) = 0`, so radvd immediately signals clients to deprecate addresses from this prefix.
+- `AdvValidLifetime 0` — `min(0, anything) = 0`, so radvd immediately signals clients to discard SLAAC addresses derived from this prefix.
+- `DecrementLifetimes off` — ensures radvd keeps transmitting RAs with the zero lifetime rather than suppressing the prefix block (which would happen if the counter reached 0 with `on`).
 - `AdvDefaultLifetime` and `AdvRouteLifetime` are **not** zeroed on DOWN — the router remains reachable as a last resort.
 
 ### 6.5 radvd systemd Units
@@ -1209,6 +1207,18 @@ This is **disabled by default** because it may cause unexpected failures with mi
 
 The SLA ID assignment is **fixed at config-file order** — it does not change if uplinks are added or removed. If the config changes (e.g., a new network is added), `uplinkmgr-setup` must be re-run and dhcpcd restarted to re-request PD with updated SLA IDs.
 
+### 9.6 Optional Exclusive Preferred-Lifetime Enforcement
+
+If `exclusive_preferred_pd: true`, only the highest-priority working IPv6 uplink (the first UP uplink by config-file index) advertises its prefix with a positive `AdvPreferredLifetime`. All other UP uplinks advertise `AdvPreferredLifetime 0`, immediately deprecating their SLAAC addresses. `AdvValidLifetime` is unchanged for non-primary UP uplinks — existing connections using deprecated addresses continue until the valid lifetime expires.
+
+**Use case:** Clients that ignore RFC 6724 rule 5.5 ("prefer source address matching outgoing interface") or have other broken source-address selection may pick an address from the wrong uplink's prefix for a given destination. The resulting traffic is asymmetric — it arrives on one macvlan but the client's destination is via a different one — and can be blackholed or refused (especially with `reject_wrong_pd_src: true`). Setting `exclusive_preferred_pd: true` ensures that at any given time only one prefix has preferred SLAAC addresses, eliminating the ambiguity at the cost of multi-homed source diversity.
+
+**Behavior on uplink state change:** When the primary uplink fails and a secondary becomes the new primary, the new primary's prefix transitions from deprecated (preferred=0) to preferred (preferred=pltime_remaining). A SIGHUP is sufficient: radvd re-reads the updated config (preferred=pltime_remaining) and the macvlan's interface address lifetime simultaneously, so the correct preferred lifetime is advertised immediately without a full radvd restart.
+
+**Trade-off:** This option sacrifices source-address diversity — all clients use addresses from the same uplink simultaneously. A new connection established during a brief window where the old primary's RAs have expired but the new primary's RAs have not yet arrived may fail. This is a site-wide policy knob, not a per-client fix; use it only when RFC 6724 compliance cannot be relied on.
+
+This is **disabled by default**.
+
 ---
 
 ## 10. Monitoring and State Machine
@@ -1381,6 +1391,9 @@ for uplink in ipv6_uplinks:
     else:
         preference = 'high' if uplink == highest_priority_v6 else 'medium'
         prefix_info = _derive_prefix_info(pd_state, uplink, now)
+        # exclusive_preferred_pd: only the primary UP uplink gets preferred > 0
+        if cfg.exclusive_preferred_pd and uplink != highest_priority_v6:
+            preferred_lifetime = 0
 
     generate_radvd_config(uplink, preference, nd1_remaining,
                           preferred_lifetime, valid_lifetime, prefix_info)
@@ -1409,7 +1422,7 @@ def _derive_prefix_info(pd_state, uplink, now):
 
 Both `AdvDefaultLifetime` (the Router Lifetime field in the RA header) and `AdvRouteLifetime` (for the explicit `::/0` route block) are set to the **remaining `lifetime`** from `<uplink-name>.ipv6ra.state`. This propagates the upstream router's validity window directly to clients.
 
-`AdvDefaultLifetime` is **not** zeroed on downstate — the router remains reachable as a last resort. `AdvPreferredLifetime 0` and `AdvValidLifetime 0` together signal clients to immediately abandon addresses from the failed uplink's prefix. `DecrementLifetimes off` is set alongside `AdvValidLifetime 0` so that radvd keeps sending the invalidating RA rather than suppressing the prefix block once its lifetime reaches zero.
+`AdvDefaultLifetime` is **not** zeroed on downstate — the router remains reachable as a last resort. `AdvPreferredLifetime 0` and `AdvValidLifetime 0` together signal clients to immediately abandon addresses from the failed uplink's prefix. `DecrementLifetimes off` is always used (see §6.4); for the DOWN case it additionally ensures radvd keeps sending the invalidating RA rather than suppressing the prefix block.
 
 ---
 
@@ -1758,7 +1771,7 @@ The following items require verification against upstream documentation or testi
 | 14 | ping | ~~Whether `ping6` is available separately or merged into `ping` on Debian 13's `iputils-ping`~~ **Confirmed:** `ping6` is provided by `iputils-ping`. | — |
 | 15 | dhcpcd | ~~Whether running uplinkmgr's dhcpcd alongside a system-default dhcpcd instance would cause conflicts~~ **Resolved:** conflicts are avoided by design. uplinkmgr uses a single dhcpcd instance (the system `dhcpcd.service`) with `allowinterfaces` restricting it to uplinkmgr's interfaces. The system-default dhcpcd config is replaced by `postinst`; no separate per-uplink dhcpcd process is involved. | — |
 | 16 | iproute2 | ~~Whether `ip -6 route replace … expires <seconds>` is valid syntax for setting route expiry in iproute2 on Debian 13 (Trixie)~~ **Confirmed:** correct syntax. | — |
-| 17 | radvd | ~~Whether radvd resets `DecrementLifetimes` counters to the config-file values on SIGHUP, or continues counting from where they were~~ **Confirmed:** SIGHUP does not reset counters; they continue decrementing from where they were. Config values are only applied at (re)start. Daemon uses SIGHUP for preference changes and `systemctl restart` for lifetime refreshes. | — |
+| 17 | radvd | ~~Whether radvd resets `DecrementLifetimes` counters to the config-file values on SIGHUP, or continues counting from where they were~~ **Confirmed:** SIGHUP does not reset counters; they continue decrementing from where they were. However, `DecrementLifetimes on` is not used: radvd advertises `min(configured_lifetime, address_lifetime_on_interface)`, and since dhcpcd keeps macvlan address lifetimes current, the interface address IS the countdown. `DecrementLifetimes off` is set universally; SIGHUP is sufficient for all radvd config updates including lifetime changes. | — |
 
 ---
 

@@ -335,6 +335,11 @@ uplinkmgr:
   # If true, prohibit macvlan traffic whose source is from a different uplink's PD prefix.
   reject_wrong_pd_src: false    # default
 
+  # If true, set AdvPreferredLifetime 0 on all but the highest-priority UP uplink.
+  # Forces broken clients (those ignoring RFC 6724 rule 5.5) to use only the primary
+  # uplink's prefix. Uplink state changes use radvd restart (not SIGHUP) when enabled.
+  exclusive_preferred_pd: false # default
+
   # Minimum seconds between radvd restarts (lifetime refresh rate limit).
   radvd_min_restart_interval: 60 # default
 

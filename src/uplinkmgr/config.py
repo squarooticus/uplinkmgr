@@ -60,6 +60,7 @@ class Config:
     routing_table_start: int
     rule_priority_start: int
     reject_wrong_pd_src: bool
+    exclusive_preferred_pd: bool
     radvd_min_restart_interval: int
     monitor: MonitorConfig
     networks: list[NetworkConfig]
@@ -93,6 +94,7 @@ def load(path: str = DEFAULT_CONFIG_PATH) -> Config:
     routing_table_start = int(top.get("routing_table_start", DEFAULT_ROUTING_TABLE_START))
     rule_priority_start = int(top.get("rule_priority_start", DEFAULT_RULE_PRIORITY_START))
     reject_wrong_pd_src = bool(top.get("reject_wrong_pd_src", False))
+    exclusive_preferred_pd = bool(top.get("exclusive_preferred_pd", False))
     radvd_min_restart_interval = int(top.get("radvd_min_restart_interval",
                                               DEFAULT_RADVD_MIN_RESTART_INTERVAL))
 
@@ -120,6 +122,7 @@ def load(path: str = DEFAULT_CONFIG_PATH) -> Config:
         routing_table_start=routing_table_start,
         rule_priority_start=rule_priority_start,
         reject_wrong_pd_src=reject_wrong_pd_src,
+        exclusive_preferred_pd=exclusive_preferred_pd,
         radvd_min_restart_interval=radvd_min_restart_interval,
         monitor=monitor,
         networks=networks,

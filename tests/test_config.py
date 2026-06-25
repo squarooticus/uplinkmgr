@@ -49,6 +49,7 @@ def test_minimal_loads_and_applies_defaults(tmp_path):
     assert cfg.routing_table_start == DEFAULT_ROUTING_TABLE_START
     assert cfg.rule_priority_start == DEFAULT_RULE_PRIORITY_START
     assert cfg.reject_wrong_pd_src is False
+    assert cfg.exclusive_preferred_pd is False
     assert cfg.radvd_min_restart_interval == DEFAULT_RADVD_MIN_RESTART_INTERVAL
     assert cfg.monitor.interval == DEFAULT_MONITOR_INTERVAL
     assert cfg.monitor.failure_threshold == DEFAULT_FAILURE_THRESHOLD
@@ -93,6 +94,20 @@ def test_all_options_explicit(tmp_path):
     assert u.ia_na is True
     assert u.ipv6_pd_hint == 48
     assert u.metric == 500
+
+
+def test_exclusive_preferred_pd_parses(tmp_path):
+    cfg = load(_cfg_file(tmp_path, """
+        uplinkmgr:
+          exclusive_preferred_pd: true
+          networks:
+            - name: lan
+              interface: eth1
+          uplinks:
+            - name: isp
+              interface: eth0
+        """))
+    assert cfg.exclusive_preferred_pd is True
 
 
 def test_ia_na_without_ipv6_pd(tmp_path):

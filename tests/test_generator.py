@@ -169,6 +169,7 @@ def test_radvd_conf_from_state_is_up_passes_through_lifetimes():
     )
     assert "AdvPreferredLifetime 3600;" in out
     assert "AdvValidLifetime 7200;" in out
+    assert "DecrementLifetimes off;" in out
 
 
 def test_radvd_conf_from_state_prefix_in_output():
