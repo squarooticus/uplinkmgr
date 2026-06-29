@@ -752,7 +752,7 @@ hook /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr
 
 ### 6.3 dhcpcd systemd Units
 
-uplinkmgr uses the `dhcpcd.service` unit supplied by the Debian `dhcpcd5` package directly — no custom unit is generated. `uplinkmgr-setup` writes `/etc/dhcpcd.conf` (backing up the previous file to `/etc/dhcpcd.conf.pre-uplinkmgr`), and the standard `dhcpcd.service` is restarted to pick it up.
+uplinkmgr uses the `dhcpcd.service` unit supplied by the Debian `dhcpcd` package directly — no custom unit is generated. `uplinkmgr-setup` writes `/etc/dhcpcd.conf` (backing up the previous file to `/etc/dhcpcd.conf.pre-uplinkmgr`), and the standard `dhcpcd.service` is restarted to pick it up.
 
 ### 6.4 radvd Configuration Files
 
@@ -1524,11 +1524,10 @@ If the daemon itself receives SIGHUP, it reloads the config file and resets all 
 ### 14.2 Dependencies
 
 ```
-Depends: python3 (>= 3.9), dhcpcd5, radvd, iproute2, iputils-ping, ifupdown
+Depends: python3 (>= 3.9), dhcpcd, radvd, iproute2, iputils-ping, ifupdown
 ```
 
 **Notes:**
-- `dhcpcd5` is the Debian 13 (Trixie) package name for dhcpcd.
 - `iputils-ping` provides `ping` and `ping6` (or `ping` with IPv6 support — confirm on Debian 13 (Trixie)).
 - `ifupdown` is needed for the interfaces.d mechanism.
 - Python 3.9+ is required for type hints and `importlib.resources` usage.

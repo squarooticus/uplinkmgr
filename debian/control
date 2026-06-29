@@ -15,7 +15,7 @@ Depends:
  ${python3:Depends},
  ${misc:Depends},
  python3-yaml,
- dhcpcd5,
+ dhcpcd,
  radvd,
  iproute2,
  iputils-ping,

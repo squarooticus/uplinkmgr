@@ -34,7 +34,7 @@ delegates to existing tools rather than replacing them:
   in `/etc/network/interfaces` and `/etc/network/interfaces.d/`. uplinkmgr
   does not bring interfaces up or down itself.
 
-- **dhcpcd** (package `dhcpcd5`) handles DHCP and DHCPv6 on WAN interfaces,
+- **dhcpcd** (package `dhcpcd`) handles DHCP and DHCPv6 on WAN interfaces,
   including requesting IPv6 prefix delegation and sub-delegating subnets to
   macvlan interfaces. uplinkmgr-setup generates `/etc/dhcpcd.conf`; the hook
   at `/lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr` is the handoff point between
@@ -367,7 +367,7 @@ uplinkmgr:
 ## Requirements
 
 - Debian 13 (Trixie) or equivalent
-- dhcpcd 10.x (`dhcpcd5` package)
+- dhcpcd 10.x (`dhcpcd` package)
 - radvd 2.x (`radvd` package)
 - iproute2, iputils-ping, ifupdown
 - Python 3.9+, python3-yaml
