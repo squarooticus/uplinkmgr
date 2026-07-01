@@ -9,7 +9,7 @@ import pytest
 
 from tests.conftest import make_config, make_uplink, make_network
 from uplinkmgr.statemachine import LinkState, UplinkState
-from uplinkmgr import radvd
+from uplinkmgr import radvd, naming
 from uplinkmgr.state import IPv6PdState, IPv6RaState
 
 
@@ -21,10 +21,12 @@ def _down_state(name: str) -> UplinkState:
     return UplinkState(name=name, ipv4=LinkState.DOWN, ipv6=LinkState.DOWN)
 
 
-def _pd_state(pltime: int = 14400, vltime: int = 86400) -> IPv6PdState:
+def _pd_state(pltime: int = 14400, vltime: int = 86400,
+              delegated_prefix: str = "2001:db8::",
+              delegated_length: int = 56) -> IPv6PdState:
     return IPv6PdState(
-        delegated_prefix="2001:db8::",
-        delegated_length=56,
+        delegated_prefix=delegated_prefix,
+        delegated_length=delegated_length,
         vltime=vltime,
         pltime=pltime,
         timestamp=int(time.time()),
@@ -202,3 +204,69 @@ class TestExclusivePreferredPdEnabled:
         assert result["isp1"]["preferred_lifetime"] > 0
         assert result["isp2"]["preferred_lifetime"] == 0
         assert result["isp3"]["preferred_lifetime"] == 0
+
+
+# ---------------------------------------------------------------------------
+# _derive_prefixes
+# ---------------------------------------------------------------------------
+
+class TestDerivePrefixes:
+    def test_pd_state_none_returns_empty(self):
+        cfg = make_config(networks=[make_network("lan", "eth1")])
+        uplink = make_uplink("isp", "eth0", index=0, ipv6_pd=True)
+
+        assert radvd._derive_prefixes(cfg, uplink, None) == {}
+
+    def test_single_network_gets_first_subnet(self):
+        cfg = make_config(networks=[make_network("lan", "eth1")])
+        uplink = make_uplink("isp", "eth0", index=0, ipv6_pd=True)
+        pd_state = _pd_state(delegated_prefix="2001:db8::", delegated_length=56)
+
+        result = radvd._derive_prefixes(cfg, uplink, pd_state)
+
+        mv = naming.macvlan_name("eth1", uplink.index)
+        assert result == {mv: "2001:db8::/64"}
+
+    def test_multiple_networks_sla_id_placed_at_bit_64(self):
+        # Regression test: the SLA ID field starts at a fixed bit position (64),
+        # not at a position derived from the delegation's own width (sla_bits).
+        cfg = make_config(networks=[
+            make_network("lan1", "eth1"),
+            make_network("lan2", "eth2"),
+        ])
+        uplink = make_uplink("isp", "eth0", index=0, ipv6_pd=True)
+        pd_state = _pd_state(delegated_prefix="2001:db8::", delegated_length=56)
+
+        result = radvd._derive_prefixes(cfg, uplink, pd_state)
+
+        mv1 = naming.macvlan_name("eth1", uplink.index)
+        mv2 = naming.macvlan_name("eth2", uplink.index)
+        assert result[mv1] == "2001:db8::/64"          # sla_id=0
+        assert result[mv2] == "2001:db8:0:1::/64"       # sla_id=1 -> bit 64 set
+
+    def test_networks_exactly_fill_available_subnets(self):
+        # /62 delegation -> sla_bits=2 -> exactly 4 distinct /64 subnets available.
+        cfg = make_config(networks=[
+            make_network(f"lan{i}", f"eth{i + 1}") for i in range(4)
+        ])
+        uplink = make_uplink("isp", "eth0", index=0, ipv6_pd=True)
+        pd_state = _pd_state(delegated_prefix="2001:db8::", delegated_length=62)
+
+        result = radvd._derive_prefixes(cfg, uplink, pd_state)
+
+        assert len(result) == 4
+        assert len(set(result.values())) == 4  # all distinct
+
+    def test_too_many_networks_for_delegation_returns_empty(self, caplog):
+        # /62 delegation -> sla_bits=2 -> only 4 distinct /64 subnets available.
+        cfg = make_config(networks=[
+            make_network(f"lan{i}", f"eth{i + 1}") for i in range(5)
+        ])
+        uplink = make_uplink("isp", "eth0", index=0, ipv6_pd=True)
+        pd_state = _pd_state(delegated_prefix="2001:db8::", delegated_length=62)
+
+        with caplog.at_level("WARNING", logger="uplinkmgr.radvd"):
+            result = radvd._derive_prefixes(cfg, uplink, pd_state)
+
+        assert result == {}
+        assert "too small" in caplog.text

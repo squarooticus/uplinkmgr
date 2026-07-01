@@ -1415,12 +1415,19 @@ def _derive_prefix_info(pd_state, uplink, now):
         f"{pd_state.delegated_prefix}/{pd_state.delegated_length}", strict=False
     )
     sla_bits = 64 - pd_state.delegated_length  # number of bits available for SLA IDs
+    if len(uplink.macvlan_ifaces) > 2**sla_bits:
+        log.warning(f"prefix delegation (/{pd_state.delegated_length}) too small "
+                    f"for network count {len(uplink.macvlan_ifaces)}")
+        return [None] * len(uplink.macvlan_ifaces)
     vltime = max(0, pd_state.vltime - (now - pd_state.timestamp))
     pltime = max(0, pd_state.pltime - (now - pd_state.timestamp))
 
     result = []
     for sla_id, iface in enumerate(uplink.macvlan_ifaces):
-        subnet_addr = delegated.network_address + (sla_id << sla_bits)
+        # The SLA ID field always starts at bit 64 (immediately above the /64's
+        # interface-identifier bits), regardless of the delegated prefix length --
+        # its *width* (sla_bits) only bounds how many distinct sla_id values fit.
+        subnet_addr = delegated.network_address + (sla_id << 64)
         prefix = ipaddress.ip_network(f"{subnet_addr}/64")
         result.append({'iface': iface, 'prefix': prefix, 'vltime': vltime, 'pltime': pltime})
     return result

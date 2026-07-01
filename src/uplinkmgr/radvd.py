@@ -117,12 +117,15 @@ def _derive_prefixes(
             f"{pd_state.delegated_prefix}/{pd_state.delegated_length}", strict=False
         )
         sla_bits = 64 - pd_state.delegated_length
+        if len(cfg.networks) > 2**sla_bits:
+            log.warning(f"prefix delegation (/{pd_state.delegated_length}) too small for network count {len(cfg.networks)}")
+            return {}
         if sla_bits < 0:
             return {}
         result = {}
         for sla_id, net in enumerate(cfg.networks):
             mv = naming.macvlan_name(net.interface, uplink.index)
-            subnet_addr = delegated.network_address + (sla_id << sla_bits)
+            subnet_addr = delegated.network_address + (sla_id << 64)
             prefix = ipaddress.ip_network(f"{subnet_addr}/64")
             result[mv] = str(prefix)
         return result
