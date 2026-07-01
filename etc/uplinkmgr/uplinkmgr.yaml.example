@@ -11,7 +11,7 @@ uplinkmgr:
 
   # If true, add a prohibit default to per-uplink tables to reject
   # packets with a source address that doesn't belong to that uplink.
-  reject_incompatible_src: false
+  reject_wrong_pd_src: false
 
   monitor:
     interval: 10             # seconds between probe cycles
