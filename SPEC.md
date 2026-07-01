@@ -963,20 +963,24 @@ The symlinks for macvlan interfaces ensure the hook's early `[ -f "$env_file" ] 
 
 ### 7.1 Macvlan Interface Names
 
-Pattern: `<internal-iface>-u<uplink-index>`
+Pattern: `<internal-iface>-u<uplink-index>`, with any `.` in `<internal-iface>` replaced
+by `_`. This is required because a literal `.` in the generated name would be
+misread by dhcpcd/ifupdown's `<parent>.<vlan-id>` VLAN-tagged-interface naming
+convention (see `interfaces(5)`) — without this substitution, a macvlan derived
+from a VLAN parent like `sfp0.20` would itself look like a tagged sub-interface.
 
 Examples:
 - Internal interface `vlan10`, uplink index 0 → `vlan10-u0`
-- Internal interface `sfp0.20`, uplink index 1 → `sfp0.20-u1`
+- Internal interface `sfp0.20`, uplink index 1 → `sfp0_20-u1`
 
-**Truncation:** Linux interface names are limited to 15 characters (IFNAMSIZ - 1). If the derived name exceeds 15 characters, it is truncated as follows:
+**Truncation:** Linux interface names are limited to 15 characters (IFNAMSIZ - 1). If the derived name (after dot substitution) exceeds 15 characters, it is truncated as follows:
 
-1. Determine whether the interface name ends with a numeric/dot suffix matching `[0-9.]*[0-9]$` (e.g. `1.20` in `sfp0.1.20`, or `20` in `vlan20`).
-2. **If a numeric suffix is present:** preserve it intact and preserve the `-u<N>` uplink suffix intact; truncate only the leading alphabetic portion to fit within 15 characters. If the numeric suffix + `-u<N>` together already exceed 15 characters, `uplinkmgr-setup` raises an error and refuses to proceed.
+1. Determine whether the (dot-substituted) interface name ends with a numeric suffix matching `[0-9]+$` (e.g. `20` in `vlan20` or in `sfp0_20`).
+2. **If a numeric suffix is present:** preserve it intact and preserve the `-u<N>` uplink suffix intact; truncate only the leading portion (which may include `_` separators) to fit within 15 characters. If the numeric suffix + `-u<N>` together already exceed 15 characters, `uplinkmgr-setup` raises an error and refuses to proceed.
 3. **If no numeric suffix is present:** truncate the interface name from the right: `<iface[:15-len(suffix)]><suffix>`.
 
 Examples:
-- `abcdefghi1.20`, uplink 1: numeric suffix `1.20` (4), uplink suffix `-u1` (3) → 7 chars fixed; 8 available for alpha prefix `abcdefghi` → truncated to `abcdefgh` → `abcdefgh1.20-u1`
+- `abcdefghi1.20`, uplink 1: dot-substituted to `abcdefghi1_20`; numeric suffix `20` (2), uplink suffix `-u1` (3) → 5 chars fixed; 10 available for the leading portion `abcdefghi1_` → truncated to `abcdefghi1` → `abcdefghi120-u1`
 - `ethernet-uplink` (no numeric suffix), uplink 3: suffix `-u3` (3); 12 chars for prefix → `ethernet-upli-u3`
 
 `uplinkmgr-setup` validates that no two macvlan names (after truncation) are identical.

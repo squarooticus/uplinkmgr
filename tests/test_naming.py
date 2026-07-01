@@ -25,11 +25,19 @@ def test_macvlan_name_truncated_to_15():
     assert name.endswith("-u0")
 
 
-def test_macvlan_name_numeric_suffix_preserved():
-    # "eth0.20": numeric suffix "0.20" (4 chars), suffix "-u1" (3 chars)
-    # available for alpha prefix = 15 - 4 - 3 = 8; alpha "eth" (3 chars) fits
+def test_macvlan_name_dot_replaced_with_underscore():
+    # "eth0.20": dot replaced with "_" -> "eth0_20"; numeric suffix "20" (2 chars),
+    # uplink suffix "-u1" (3 chars); available for alpha prefix = 15-2-3=10; "eth0_" fits
     name = macvlan_name("eth0.20", 1)
-    assert name.endswith("0.20-u1")
+    assert name == "eth0_20-u1"
+    assert "." not in name
+    assert len(name) <= 15
+
+
+def test_macvlan_name_multiple_dots_all_replaced():
+    name = macvlan_name("sfp0.1.20", 1)
+    assert "." not in name
+    assert name == "sfp0_1_20-u1"
     assert len(name) <= 15
 
 
@@ -40,9 +48,9 @@ def test_macvlan_name_exact_15_chars():
 
 
 def test_macvlan_name_numeric_suffix_overflow_raises():
-    # ".123456789012" (13 chars as suffix) + "-u0" (3 chars) = 16 > 15
+    # "1234567890123" (13-digit numeric suffix) + "-u0" (3 chars) = 16 > 15
     with pytest.raises(ValueError):
-        macvlan_name(".123456789012", 0)
+        macvlan_name("1234567890123", 0)
 
 
 def test_macvlan_name_collision_detected():

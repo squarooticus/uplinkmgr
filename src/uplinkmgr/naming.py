@@ -6,16 +6,21 @@ import re
 
 from .config import Config, UplinkConfig, NetworkConfig
 
-_NUMERIC_SUFFIX_RE = re.compile(r'[0-9.]*[0-9]$')
+_NUMERIC_SUFFIX_RE = re.compile(r'[0-9]+$')
 
 
 def macvlan_name(net_iface: str, uplink_idx: int) -> str:
     """Return the macvlan interface name for a (network, uplink) pair.
 
-    If net_iface ends with a numeric/dot suffix (e.g. "1.20"), that suffix
-    is preserved intact; only the leading alpha portion is truncated.
-    Raises ValueError if the numeric suffix alone already leaves no room.
+    Dots in net_iface (e.g. from a VLAN parent like "sfp0.20") are replaced
+    with underscores, since a literal "." in the generated name would be
+    misread as a VLAN-tagged interface by dhcpcd/ifupdown's "<parent>.<vlan-id>"
+    naming convention. If the (sanitized) name ends with a numeric suffix
+    (e.g. "20"), that suffix is preserved intact; only the leading alpha
+    portion is truncated. Raises ValueError if the numeric suffix alone
+    already leaves no room.
     """
+    net_iface = net_iface.replace('.', '_')
     suffix = f"-u{uplink_idx}"
     m = _NUMERIC_SUFFIX_RE.search(net_iface)
     if m:
