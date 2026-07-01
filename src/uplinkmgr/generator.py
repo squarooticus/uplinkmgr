@@ -103,6 +103,20 @@ INITIAL_PREFERRED_LIFETIME = 1800
 INITIAL_DEFAULT_LIFETIME = 1800
 INITIAL_ROUTE_LIFETIME = 1800
 
+MAX_RTR_ADV_INTERVAL = 300       # radvd MaxRtrAdvInterval; also the floor for AdvDefaultLifetime
+ADV_DEFAULT_LIFETIME_MAX = 9000  # radvd's hard ceiling for AdvDefaultLifetime
+
+
+def _clamp_default_lifetime(seconds: int) -> int:
+    """Clamp to radvd's AdvDefaultLifetime constraint: 0, or [MaxRtrAdvInterval, 9000]."""
+    if seconds <= 0:
+        return 0
+    if seconds < MAX_RTR_ADV_INTERVAL:
+        return MAX_RTR_ADV_INTERVAL
+    if seconds > ADV_DEFAULT_LIFETIME_MAX:
+        return ADV_DEFAULT_LIFETIME_MAX
+    return seconds
+
 
 def radvd_conf(cfg: Config, uplink: UplinkConfig) -> str:
     """Generate initial radvd config. Uses placeholder lifetimes and ::/64 prefixes."""
@@ -168,10 +182,13 @@ def _radvd_interface_block(
     valid_lifetime: int,
     preferred_lifetime: int,
 ) -> list[str]:
+    default_lifetime = _clamp_default_lifetime(default_lifetime)
+    route_lifetime = _clamp_default_lifetime(route_lifetime)
     return [
         f"interface {iface}",
         "{",
         "    AdvSendAdvert on;",
+        f"    MaxRtrAdvInterval {MAX_RTR_ADV_INTERVAL};",
         f"    AdvDefaultPreference {preference};",
         f"    AdvDefaultLifetime {default_lifetime};",
         "",

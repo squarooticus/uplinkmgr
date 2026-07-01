@@ -197,6 +197,77 @@ def test_radvd_conf_from_state_is_up_passes_through_lifetimes():
     assert "AdvPreferredLifetime 3600;" in out
 
 
+def test_radvd_conf_from_state_sets_max_rtr_adv_interval():
+    cfg = make_config(
+        networks=[make_network("lan", "eth1")],
+        uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+    )
+    out = radvd_conf_from_state(
+        cfg, cfg.uplinks[0],
+        preference="high",
+        default_lifetime=1800,
+        route_lifetime=1800,
+        per_iface_prefixes={},
+        valid_lifetime=7200,
+        preferred_lifetime=1800,
+    )
+    assert "MaxRtrAdvInterval 300;" in out
+
+
+def test_radvd_conf_from_state_default_lifetime_floored_to_max_rtr_adv_interval():
+    cfg = make_config(
+        networks=[make_network("lan", "eth1")],
+        uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+    )
+    out = radvd_conf_from_state(
+        cfg, cfg.uplinks[0],
+        preference="high",
+        default_lifetime=100,
+        route_lifetime=100,
+        per_iface_prefixes={},
+        valid_lifetime=7200,
+        preferred_lifetime=1800,
+    )
+    assert "AdvDefaultLifetime 300;" in out
+    assert "AdvRouteLifetime 300;" in out
+
+
+def test_radvd_conf_from_state_default_lifetime_capped_at_9000():
+    cfg = make_config(
+        networks=[make_network("lan", "eth1")],
+        uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+    )
+    out = radvd_conf_from_state(
+        cfg, cfg.uplinks[0],
+        preference="high",
+        default_lifetime=10000,
+        route_lifetime=10000,
+        per_iface_prefixes={},
+        valid_lifetime=7200,
+        preferred_lifetime=1800,
+    )
+    assert "AdvDefaultLifetime 9000;" in out
+    assert "AdvRouteLifetime 9000;" in out
+
+
+def test_radvd_conf_from_state_default_lifetime_zero_stays_zero():
+    cfg = make_config(
+        networks=[make_network("lan", "eth1")],
+        uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+    )
+    out = radvd_conf_from_state(
+        cfg, cfg.uplinks[0],
+        preference="high",
+        default_lifetime=0,
+        route_lifetime=0,
+        per_iface_prefixes={},
+        valid_lifetime=7200,
+        preferred_lifetime=1800,
+    )
+    assert "AdvDefaultLifetime 0;" in out
+    assert "AdvRouteLifetime 0;" in out
+
+
 def test_radvd_conf_from_state_no_empty_rdnss_dnssl_stanzas():
     cfg = make_config(
         networks=[make_network("lan", "eth1")],

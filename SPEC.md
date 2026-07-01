@@ -769,6 +769,8 @@ The daemon regenerates these files at runtime (see §11). The format must be ide
 
 **Lifetime values are sourced from state files, never hardcoded.** The daemon reads `lifetime` (from `ipv6ra.state`), `vltime`, and `pltime` (from `ipv6pd.state`) and computes remaining lifetimes (`max(0, value - elapsed)`). These are written into the config so that when radvd starts (or restarts), it begins counting down from the correct remaining value. On SIGHUP, radvd ignores the new lifetime values in the config and continues its internal counters — so SIGHUP is only used for preference-tier changes; a full restart is used when lifetimes need refreshing (see §5.3.5).
 
+**`AdvDefaultLifetime`/`AdvRouteLifetime` are clamped before being written.** Per `radvd.conf(5)`, `AdvDefaultLifetime` must be either exactly `0` or between `MaxRtrAdvInterval` and 9000 seconds — and since the remaining-lifetime value decays continuously toward 0 between RA refreshes (and is deliberately not zeroed while an uplink is DOWN, see below), it would otherwise routinely land in the forbidden gap between 1 second and the floor. `MaxRtrAdvInterval` is set explicitly to `300` (instead of relying on radvd's own default of 600) on every generated interface block, and the computed lifetime is clamped to `0` or `[300, 9000]` accordingly (`generator._clamp_default_lifetime()`). `AdvRouteLifetime` has no such hard constraint in `radvd.conf(5)`, but is clamped identically since it's always kept equal to `AdvDefaultLifetime`.
+
 Example runtime config for uplink `comcast` (index 0, highest priority, IPv6 UP), with delegated prefix `2001:db8:aaaa::/56`, upstream RA lifetime=1800, vltime=86400, pltime=14400, written 300 seconds after delegation:
 
 ```
@@ -778,6 +780,7 @@ Example runtime config for uplink `comcast` (index 0, highest priority, IPv6 UP)
 interface vlan10-u0
 {
     AdvSendAdvert on;
+    MaxRtrAdvInterval 300;
     AdvDefaultPreference high;
     AdvDefaultLifetime 1500;        # remaining lifetime: 1800 - 300
 
@@ -802,6 +805,7 @@ interface vlan10-u0
 interface vlan20-u0
 {
     AdvSendAdvert on;
+    MaxRtrAdvInterval 300;
     AdvDefaultPreference high;
     AdvDefaultLifetime 1500;
 
@@ -1428,6 +1432,8 @@ Both `AdvDefaultLifetime` (the Router Lifetime field in the RA header) and `AdvR
 
 `AdvDefaultLifetime` is **not** zeroed on downstate — the router remains reachable as a last resort. `AdvPreferredLifetime 0` and `AdvValidLifetime 0` together signal clients to immediately abandon addresses from the failed uplink's prefix. `DecrementLifetimes off` is always used (see §6.4); for the DOWN case it additionally ensures radvd keeps sending the invalidating RA rather than suppressing the prefix block.
 
+**Clamping:** because the remaining lifetime decays continuously between RA refreshes (and, on DOWN, keeps decaying for as long as the outage lasts), the raw value routinely falls below what `radvd.conf(5)` allows for `AdvDefaultLifetime` (either exactly `0`, or between `MaxRtrAdvInterval` and 9000 seconds). `MaxRtrAdvInterval` is set explicitly to `300` on every generated interface block, and both `AdvDefaultLifetime` and `AdvRouteLifetime` are clamped to `0` or `[300, 9000]` (`generator._clamp_default_lifetime()`) before being written — an already-zero value (including the `lifetime == 0` "infinite" sentinel described in §5.3.3) passes through unclamped as `0`; distinguishing "genuinely expired" from "infinite" for that sentinel is deferred (see §17 item 20).
+
 ---
 
 ## 12. Boot-Time Behavior
@@ -1777,6 +1783,7 @@ The following items require verification against upstream documentation or testi
 | 17 | radvd | ~~Whether radvd resets `DecrementLifetimes` counters to the config-file values on SIGHUP, or continues counting from where they were~~ **Confirmed:** SIGHUP does not reset counters; they continue decrementing from where they were. However, `DecrementLifetimes on` is not used: radvd advertises `min(configured_lifetime, address_lifetime_on_interface)`, and since dhcpcd keeps macvlan address lifetimes current, the interface address IS the countdown. `DecrementLifetimes off` is set universally; SIGHUP is sufficient for all radvd config updates including lifetime changes. | — |
 | 18 | radvd | ~~Whether empty `RDNSS { };` / `DNSSL { };` stanzas are valid radvd config~~ **Confirmed: not valid.** radvd rejects empty `RDNSS`/`DNSSL` blocks. Since uplinkmgr has no config option that ever populates DNS server or search-domain content, these stanzas are omitted from generated radvd config entirely rather than emitted empty. | — |
 | 19 | dhcpcd config | ~~Whether the default (unset) IAID is safe for macvlan interfaces~~ **Confirmed: not safe.** Per `dhcpcd.conf(5)`, the default IAID is derived from the interface's VLAN ID (or, failing that, the last 4 bytes of its MAC address); both are shared across every uplink's macvlan for a given network interface (all children of the same VLAN device), causing IAID collisions on the same L2 segment. Each macvlan now gets an explicit `interface <mv> { iaid ... }` stanza with a unique IAID (`naming.macvlan_iaid()`). See §6.2. | — |
+| 20 | radvd | ~~Whether an unbounded, continuously-decaying `AdvDefaultLifetime` is valid~~ **Confirmed: not valid.** Per `radvd.conf(5)`, `AdvDefaultLifetime` must be either exactly `0` or between `MaxRtrAdvInterval` (radvd default: 600s, previously never overridden here) and 9000 seconds; the live remaining-lifetime value decays continuously and routinely lands in the forbidden 1-second-to-floor gap. Fixed by explicitly setting `MaxRtrAdvInterval 300;` and clamping `AdvDefaultLifetime`/`AdvRouteLifetime` to `0` or `[300, 9000]` (`generator._clamp_default_lifetime()`). **Known follow-up, deliberately deferred:** the `lifetime == 0` "infinite" sentinel (§5.3.3) is indistinguishable from a genuinely-expired `0` in this clamp and passes through unclamped as `0`, which radvd reads as "not a default router" rather than "infinite" — not addressed by this fix. See §6.4, §11.6. | — |
 
 ---
 
