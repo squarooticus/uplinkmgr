@@ -102,7 +102,6 @@ def dhcpcd_conf(cfg: Config, head: str = "", tail: str = "") -> str:
 INITIAL_VALID_LIFETIME = 7200
 INITIAL_PREFERRED_LIFETIME = 1800
 INITIAL_DEFAULT_LIFETIME = 1800
-INITIAL_ROUTE_LIFETIME = 1800
 
 MAX_RTR_ADV_INTERVAL = 300       # radvd MaxRtrAdvInterval; also the floor for AdvDefaultLifetime
 ADV_DEFAULT_LIFETIME_MAX = 9000  # radvd's hard ceiling for AdvDefaultLifetime
@@ -132,7 +131,6 @@ def radvd_conf(cfg: Config, uplink: UplinkConfig) -> str:
             iface=mv,
             preference="high",
             default_lifetime=INITIAL_DEFAULT_LIFETIME,
-            route_lifetime=INITIAL_ROUTE_LIFETIME,
             prefix="::/64",
             valid_lifetime=INITIAL_VALID_LIFETIME,
             preferred_lifetime=INITIAL_PREFERRED_LIFETIME,
@@ -145,7 +143,6 @@ def radvd_conf_from_state(
     uplink: UplinkConfig,
     preference: str,
     default_lifetime: int,
-    route_lifetime: int,
     per_iface_prefixes: dict[str, str],  # macvlan_name -> prefix/64
     valid_lifetime: int,
     preferred_lifetime: int,
@@ -160,13 +157,13 @@ def radvd_conf_from_state(
     for net in cfg.networks:
         mv = naming.macvlan_name(net.interface, uplink.index)
         prefix = per_iface_prefixes.get(mv, "::/64")
+        eff_default = 0 if is_down else default_lifetime
         eff_preferred = 0 if is_down else preferred_lifetime
         eff_valid = 0 if is_down else valid_lifetime
         lines += _radvd_interface_block(
             iface=mv,
             preference=preference,
-            default_lifetime=default_lifetime,
-            route_lifetime=route_lifetime,
+            default_lifetime=eff_default,
             prefix=prefix,
             valid_lifetime=eff_valid,
             preferred_lifetime=eff_preferred,
@@ -178,13 +175,11 @@ def _radvd_interface_block(
     iface: str,
     preference: str,
     default_lifetime: int,
-    route_lifetime: int,
     prefix: str,
     valid_lifetime: int,
     preferred_lifetime: int,
 ) -> list[str]:
     default_lifetime = _clamp_default_lifetime(default_lifetime)
-    route_lifetime = _clamp_default_lifetime(route_lifetime)
     return [
         f"interface {iface}",
         "{",
@@ -192,12 +187,6 @@ def _radvd_interface_block(
         f"    MaxRtrAdvInterval {MAX_RTR_ADV_INTERVAL};",
         f"    AdvDefaultPreference {preference};",
         f"    AdvDefaultLifetime {default_lifetime};",
-        "",
-        "    route ::/0",
-        "    {",
-        f"        AdvRoutePreference {preference};",
-        f"        AdvRouteLifetime {route_lifetime};",
-        "    };",
         "",
         f"    prefix {prefix}",
         "    {",

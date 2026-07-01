@@ -1,4 +1,4 @@
-"""Tests for radvd.py — regenerate_all preferred_lifetime logic."""
+"""Tests for radvd.py — regenerate_all preferred/default lifetime logic."""
 
 from __future__ import annotations
 
@@ -102,6 +102,8 @@ class TestExclusivePreferredPdDisabled:
 
         assert result["isp1"]["preferred_lifetime"] > 0
         assert result["isp2"]["preferred_lifetime"] > 0
+        assert result["isp1"]["default_lifetime"] > 0
+        assert result["isp2"]["default_lifetime"] > 0
 
     def test_single_up_gets_positive_preferred_lifetime(self, tmp_path):
         cfg = make_config(
@@ -136,6 +138,8 @@ class TestExclusivePreferredPdEnabled:
 
         assert result["isp1"]["preferred_lifetime"] > 0
         assert result["isp2"]["preferred_lifetime"] == 0
+        assert result["isp1"]["default_lifetime"] > 0
+        assert result["isp2"]["default_lifetime"] == 0
 
     def test_single_up_uplink_is_primary_gets_positive(self, tmp_path):
         cfg = make_config(
@@ -148,6 +152,7 @@ class TestExclusivePreferredPdEnabled:
         result = _run_regenerate_all(cfg, states, tmp_path)
 
         assert result["isp1"]["preferred_lifetime"] > 0
+        assert result["isp1"]["default_lifetime"] > 0
 
     def test_down_uplink_handled_via_is_down_not_secondary_path(self, tmp_path):
         # A DOWN uplink gets is_down=True passed to the generator (which zeros preferred/valid).
@@ -182,6 +187,7 @@ class TestExclusivePreferredPdEnabled:
 
         assert result["isp1"]["is_down"] is True
         assert result["isp2"]["preferred_lifetime"] > 0  # now the only UP uplink = primary
+        assert result["isp2"]["default_lifetime"] > 0
 
     def test_three_uplinks_only_primary_gets_positive(self, tmp_path):
         cfg = make_config(
@@ -204,6 +210,9 @@ class TestExclusivePreferredPdEnabled:
         assert result["isp1"]["preferred_lifetime"] > 0
         assert result["isp2"]["preferred_lifetime"] == 0
         assert result["isp3"]["preferred_lifetime"] == 0
+        assert result["isp1"]["default_lifetime"] > 0
+        assert result["isp2"]["default_lifetime"] == 0
+        assert result["isp3"]["default_lifetime"] == 0
 
 
 # ---------------------------------------------------------------------------

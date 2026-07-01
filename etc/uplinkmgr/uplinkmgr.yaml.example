@@ -10,8 +10,16 @@ uplinkmgr:
   rule_priority_start: 29000
 
   # If true, add a prohibit default to per-uplink tables to reject
-  # packets with a source address that doesn't belong to that uplink.
+  # packets with a source address that doesn't belong to that uplink. This has
+  # the potentially unwanted side effect of eliminating IPv6
+  # fallback-to-table-`main` for clients.
   reject_wrong_pd_src: false
+
+  # RFC 6724 rule 5.5 isn't actually implemented everywhere yet, so you
+  # probably want this on. This ensures each client has preferred addresses
+  # from only one PD at a time, and that only one virtual router at a time
+  # advertises a default IPv6 route.
+  exclusive_preferred_pd: true
 
   monitor:
     interval: 10             # seconds between probe cycles

@@ -59,10 +59,8 @@ def regenerate_all(
 
         if ra_state is not None:
             default_lifetime = ra_state.remaining_lifetime(now)
-            route_lifetime = default_lifetime
         else:
             default_lifetime = _FALLBACK_LIFETIME
-            route_lifetime = _FALLBACK_LIFETIME
 
         if pd_state is not None:
             valid_lifetime = pd_state.remaining_vltime(now)
@@ -71,13 +69,19 @@ def regenerate_all(
             valid_lifetime = generator.INITIAL_VALID_LIFETIME
             preferred_lifetime = generator.INITIAL_PREFERRED_LIFETIME
 
-        is_dispreferred = (
+        # exclusive_preferred_pd: only one UP uplink should ever be visible to
+        # clients as a default router, since RFC 6724 rule 5.5 (source/router
+        # address selection matching) isn't implemented in most stacks yet --
+        # so secondary UP uplinks are fully withdrawn (preferred lifetime and
+        # default-router lifetime both zeroed), not just dispreferred.
+        is_secondary = (
             cfg.exclusive_preferred_pd
             and not is_down
             and not (up_uplinks and up_uplinks[0].name == uplink.name)
         )
-        if is_dispreferred:
+        if is_secondary:
             preferred_lifetime = 0
+            default_lifetime = 0
 
         per_iface_prefixes = _derive_prefixes(cfg, uplink, pd_state)
 
@@ -86,7 +90,6 @@ def regenerate_all(
             uplink=uplink,
             preference=pref,
             default_lifetime=default_lifetime,
-            route_lifetime=route_lifetime,
             per_iface_prefixes=per_iface_prefixes,
             valid_lifetime=valid_lifetime,
             preferred_lifetime=preferred_lifetime,

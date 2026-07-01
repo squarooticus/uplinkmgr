@@ -180,7 +180,6 @@ def test_radvd_conf_from_state_is_down_zeroes_preferred_lifetime():
         cfg, cfg.uplinks[0],
         preference="low",
         default_lifetime=0,
-        route_lifetime=0,
         per_iface_prefixes={"eth1-u0": "2001:db8:1::/64"},
         valid_lifetime=7200,
         preferred_lifetime=1800,
@@ -189,6 +188,23 @@ def test_radvd_conf_from_state_is_down_zeroes_preferred_lifetime():
     assert "AdvPreferredLifetime 0;" in out
     assert "AdvValidLifetime 0;" in out
     assert "DecrementLifetimes off;" in out
+
+
+def test_radvd_conf_from_state_is_down_zeroes_default_lifetime():
+    cfg = make_config(
+        networks=[make_network("lan", "eth1")],
+        uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+    )
+    out = radvd_conf_from_state(
+        cfg, cfg.uplinks[0],
+        preference="low",
+        default_lifetime=1800,
+        per_iface_prefixes={"eth1-u0": "2001:db8:1::/64"},
+        valid_lifetime=7200,
+        preferred_lifetime=1800,
+        is_down=True,
+    )
+    assert "AdvDefaultLifetime 0;" in out
 
 
 def test_radvd_conf_from_state_is_up_passes_through_lifetimes():
@@ -200,7 +216,6 @@ def test_radvd_conf_from_state_is_up_passes_through_lifetimes():
         cfg, cfg.uplinks[0],
         preference="high",
         default_lifetime=1800,
-        route_lifetime=1800,
         per_iface_prefixes={"eth1-u0": "2001:db8:1::/64"},
         valid_lifetime=7200,
         preferred_lifetime=3600,
@@ -218,7 +233,6 @@ def test_radvd_conf_from_state_sets_max_rtr_adv_interval():
         cfg, cfg.uplinks[0],
         preference="high",
         default_lifetime=1800,
-        route_lifetime=1800,
         per_iface_prefixes={},
         valid_lifetime=7200,
         preferred_lifetime=1800,
@@ -235,13 +249,11 @@ def test_radvd_conf_from_state_default_lifetime_floored_to_max_rtr_adv_interval(
         cfg, cfg.uplinks[0],
         preference="high",
         default_lifetime=100,
-        route_lifetime=100,
         per_iface_prefixes={},
         valid_lifetime=7200,
         preferred_lifetime=1800,
     )
     assert "AdvDefaultLifetime 300;" in out
-    assert "AdvRouteLifetime 300;" in out
 
 
 def test_radvd_conf_from_state_default_lifetime_capped_at_9000():
@@ -253,13 +265,11 @@ def test_radvd_conf_from_state_default_lifetime_capped_at_9000():
         cfg, cfg.uplinks[0],
         preference="high",
         default_lifetime=10000,
-        route_lifetime=10000,
         per_iface_prefixes={},
         valid_lifetime=7200,
         preferred_lifetime=1800,
     )
     assert "AdvDefaultLifetime 9000;" in out
-    assert "AdvRouteLifetime 9000;" in out
 
 
 def test_radvd_conf_from_state_default_lifetime_zero_stays_zero():
@@ -271,13 +281,30 @@ def test_radvd_conf_from_state_default_lifetime_zero_stays_zero():
         cfg, cfg.uplinks[0],
         preference="high",
         default_lifetime=0,
-        route_lifetime=0,
         per_iface_prefixes={},
         valid_lifetime=7200,
         preferred_lifetime=1800,
     )
     assert "AdvDefaultLifetime 0;" in out
-    assert "AdvRouteLifetime 0;" in out
+
+
+def test_radvd_conf_from_state_no_route_stanza():
+    cfg = make_config(
+        networks=[make_network("lan", "eth1")],
+        uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+    )
+    out = radvd_conf_from_state(
+        cfg, cfg.uplinks[0],
+        preference="high",
+        default_lifetime=1800,
+        per_iface_prefixes={"eth1-u0": "2001:db8:1::/64"},
+        valid_lifetime=7200,
+        preferred_lifetime=3600,
+        is_down=False,
+    )
+    assert "route ::/0" not in out
+    assert "AdvRoutePreference" not in out
+    assert "AdvRouteLifetime" not in out
 
 
 def test_radvd_conf_from_state_no_empty_rdnss_dnssl_stanzas():
@@ -289,7 +316,6 @@ def test_radvd_conf_from_state_no_empty_rdnss_dnssl_stanzas():
         cfg, cfg.uplinks[0],
         preference="high",
         default_lifetime=1800,
-        route_lifetime=1800,
         per_iface_prefixes={"eth1-u0": "2001:db8:1::/64"},
         valid_lifetime=7200,
         preferred_lifetime=3600,
@@ -310,7 +336,6 @@ def test_radvd_conf_from_state_prefix_in_output():
         cfg, cfg.uplinks[0],
         preference="high",
         default_lifetime=1800,
-        route_lifetime=1800,
         per_iface_prefixes={"eth1-u0": "2001:db8:abcd::/64"},
         valid_lifetime=7200,
         preferred_lifetime=3600,
@@ -328,7 +353,6 @@ def test_radvd_conf_from_state_missing_prefix_falls_back():
         cfg, cfg.uplinks[0],
         preference="high",
         default_lifetime=1800,
-        route_lifetime=1800,
         per_iface_prefixes={},  # no entry for eth1-u0
         valid_lifetime=7200,
         preferred_lifetime=3600,
