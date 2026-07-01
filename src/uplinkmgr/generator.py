@@ -184,8 +184,6 @@ def _radvd_interface_block(
         "        DecrementLifetimes off;",
         "    };",
         "",
-        "    RDNSS { };",
-        "    DNSSL { };",
         "};",
         "",
     ]
@@ -208,11 +206,10 @@ def radvd_template_unit() -> str:
         "[Service]\n"
         "Type=forking\n"
         "PIDFile=/run/radvd-uplinkmgr-%i.pid\n"
-        "ExecStart=/usr/sbin/radvd --configtest --config /etc/uplinkmgr/radvd/radvd-uplinkmgr-%i.conf\n"
+        "ExecStartPre=/usr/sbin/radvd --configtest --config /etc/uplinkmgr/radvd/radvd-uplinkmgr-%i.conf\n"
         "ExecStart=/usr/sbin/radvd \\\n"
         "    --config /etc/uplinkmgr/radvd/radvd-uplinkmgr-%i.conf \\\n"
-        "    --pidfile /run/radvd-uplinkmgr-%i.pid \\\n"
-        "    --nodaemon\n"
+        "    --pidfile /run/radvd-uplinkmgr-%i.pid\n"
         "ExecReload=/bin/kill -HUP $MAINPID\n"
         "Restart=on-failure\n"
         "RestartSec=5s\n"

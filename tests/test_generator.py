@@ -115,9 +115,11 @@ def test_radvd_template_unit_no_literal_uplink_name():
         assert name not in out
 
 
-def test_radvd_template_unit_has_two_execstart_lines():
+def test_radvd_template_unit_single_execstart_with_execstartpre():
     out = radvd_template_unit()
-    assert out.count("ExecStart=") == 2
+    assert out.count("ExecStartPre=") == 1
+    assert out.count("\nExecStart=") == 1
+    assert "--nodaemon" not in out
 
 
 def test_radvd_template_unit_conf_path():
@@ -168,6 +170,25 @@ def test_radvd_conf_from_state_is_up_passes_through_lifetimes():
         is_down=False,
     )
     assert "AdvPreferredLifetime 3600;" in out
+
+
+def test_radvd_conf_from_state_no_empty_rdnss_dnssl_stanzas():
+    cfg = make_config(
+        networks=[make_network("lan", "eth1")],
+        uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+    )
+    out = radvd_conf_from_state(
+        cfg, cfg.uplinks[0],
+        preference="high",
+        default_lifetime=1800,
+        route_lifetime=1800,
+        per_iface_prefixes={"eth1-u0": "2001:db8:1::/64"},
+        valid_lifetime=7200,
+        preferred_lifetime=3600,
+        is_down=False,
+    )
+    assert "RDNSS" not in out
+    assert "DNSSL" not in out
     assert "AdvValidLifetime 7200;" in out
     assert "DecrementLifetimes off;" in out
 

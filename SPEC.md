@@ -790,8 +790,6 @@ interface vlan10-u0
         DecrementLifetimes off;
     };
 
-    RDNSS { };
-    DNSSL { };
 };
 
 interface vlan20-u0
@@ -816,8 +814,6 @@ interface vlan20-u0
         DecrementLifetimes off;
     };
 
-    RDNSS { };
-    DNSSL { };
 };
 ```
 
@@ -860,11 +856,10 @@ Requires=dhcpcd.service
 [Service]
 Type=forking
 PIDFile=/run/radvd-uplinkmgr-comcast.pid
-ExecStart=/usr/sbin/radvd --configtest --config /etc/radvd/radvd-uplinkmgr-comcast.conf
+ExecStartPre=/usr/sbin/radvd --configtest --config /etc/radvd/radvd-uplinkmgr-comcast.conf
 ExecStart=/usr/sbin/radvd \
     --config /etc/radvd/radvd-uplinkmgr-comcast.conf \
-    --pidfile /run/radvd-uplinkmgr-comcast.pid \
-    --nodaemon
+    --pidfile /run/radvd-uplinkmgr-comcast.pid
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
@@ -874,11 +869,9 @@ WantedBy=multi-user.target
 ```
 
 **Notes:**
-- The `--configtest` `ExecStart` line validates the config before starting; systemd runs `ExecStart` lines in order and stops if any fails. This prevents radvd from starting with a malformed config.
-- `--nodaemon` with `Type=forking` — confirm the correct combination for the radvd version on Debian 13 (Trixie).
+- The config-validation command runs as `ExecStartPre`, not a second `ExecStart`: `Type=forking` services permit only one `ExecStart` directive (multiple `ExecStart` lines are only valid for `Type=oneshot`). `ExecStartPre` runs first and, if it fails, prevents `ExecStart` from running at all — so this still guards against starting radvd with a malformed config.
+- `--nodaemon` is **not** used with `Type=forking`: the real `ExecStart` process must fork into the background and exit for systemd to consider the service started and track the daemon via `PIDFile`. `--nodaemon` keeps radvd in the foreground, which is incompatible with `Type=forking`.
 - `ExecReload` with SIGHUP allows `systemctl reload` or `systemctl kill --signal=SIGHUP` to trigger config re-read.
-
-> **Verification item:** Confirm radvd's command-line flags on Debian 13 (Trixie) (`--nodaemon`, `--config`, `--pidfile`, `--configtest`). See §17.
 
 ### 6.6 nftables NAT Reference Fragment
 
@@ -1766,7 +1759,7 @@ The following items require verification against upstream documentation or testi
 | 6 | dhcpcd binary | ~~Flags `--config`, `--pidfile`, `--nobackground` in dhcpcd 10.x~~ **Confirmed:** `--config` and `--nobackground` are correct. `--pidfile` is not accepted — dhcpcd writes its pid to `/run/dhcpcd/<iface>.pid` when an interface is given as a positional argument. Systemd unit updated accordingly. | — |
 | 7 | radvd | ~~Whether radvd re-reads config on SIGHUP~~ **Confirmed:** radvd re-reads config on SIGHUP (standard Unix daemon behavior; consistent with item 17 — counters continue from where they were). Note: dhcpcd does **not** support config reload via SIGHUP; `systemctl restart` is required when the dhcpcd config changes (only after re-running `uplinkmgr-setup`). | — |
 | 8 | radvd | ~~Whether `prefix ::/64` with `AdvRouterAddr on` causes radvd to auto-use the interface's assigned /64 prefix~~ **Assumed correct:** each macvlan interface has exactly one global address assigned via PD, so radvd should pick it up unambiguously. To be verified by testing. | — |
-| 9 | radvd binary | ~~Correct command-line flags: `--nodaemon`, `--config`, `--pidfile`, `--configtest` on Debian 13's radvd 2.19~~ **Confirmed:** all four flags are correct. | — |
+| 9 | radvd binary | ~~Correct command-line flags: `--nodaemon`, `--config`, `--pidfile`, `--configtest` on Debian 13's radvd 2.19~~ **Confirmed:** all four flags exist and are valid, but `--nodaemon` must **not** be combined with `Type=forking` (it prevents radvd from forking, so systemd can't track it via `PIDFile`), and `--configtest` must run via `ExecStartPre`, not a second `ExecStart` (`Type=forking` permits only one `ExecStart` directive). See §6.5. | — |
 | 10 | ifupdown | ~~Whether `inet manual` ifaces with only `pre-up`/`up`/`down` stanzas are processed correctly; whether `auto` is needed~~ **Confirmed:** `inet manual` ifaces accept `pre-up`/`up`/`down`/`post-down` stanzas; `auto` is required to activate them at boot. | — |
 | 11 | nftables | ~~Whether `/etc/nftables.d/` exists and is included by default in Debian 13's `/etc/nftables.conf`~~ **Resolved:** `/etc/nftables.d/` is not created by the nftables package and is not loaded by default. nftables.service may also be disabled on install. NAT configuration is left entirely to the administrator; uplinkmgr-setup generates a reference fragment only. | — |
 | 12 | iproute2 | ~~Behavior when `ip route add` is called for a route that already exists~~ **Confirmed:** `ip route add` errors on a duplicate route. All route installation uses `ip route replace` throughout. | — |
@@ -1775,6 +1768,7 @@ The following items require verification against upstream documentation or testi
 | 15 | dhcpcd | ~~Whether running uplinkmgr's dhcpcd alongside a system-default dhcpcd instance would cause conflicts~~ **Resolved:** conflicts are avoided by design. uplinkmgr uses a single dhcpcd instance (the system `dhcpcd.service`) with `allowinterfaces` restricting it to uplinkmgr's interfaces. The system-default dhcpcd config is replaced by `postinst`; no separate per-uplink dhcpcd process is involved. | — |
 | 16 | iproute2 | ~~Whether `ip -6 route replace … expires <seconds>` is valid syntax for setting route expiry in iproute2 on Debian 13 (Trixie)~~ **Confirmed:** correct syntax. | — |
 | 17 | radvd | ~~Whether radvd resets `DecrementLifetimes` counters to the config-file values on SIGHUP, or continues counting from where they were~~ **Confirmed:** SIGHUP does not reset counters; they continue decrementing from where they were. However, `DecrementLifetimes on` is not used: radvd advertises `min(configured_lifetime, address_lifetime_on_interface)`, and since dhcpcd keeps macvlan address lifetimes current, the interface address IS the countdown. `DecrementLifetimes off` is set universally; SIGHUP is sufficient for all radvd config updates including lifetime changes. | — |
+| 18 | radvd | ~~Whether empty `RDNSS { };` / `DNSSL { };` stanzas are valid radvd config~~ **Confirmed: not valid.** radvd rejects empty `RDNSS`/`DNSSL` blocks. Since uplinkmgr has no config option that ever populates DNS server or search-domain content, these stanzas are omitted from generated radvd config entirely rather than emitted empty. | — |
 
 ---
 
