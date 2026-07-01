@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import patch
 import pytest
 
@@ -19,6 +20,38 @@ def _make_daemon(cfg, tmp_path) -> Daemon:
     d._cfg = cfg
     d._init_states()
     return d
+
+
+# ---------------------------------------------------------------------------
+# _reconfigure_dhcpcd
+# ---------------------------------------------------------------------------
+
+class TestReconfigureDhcpcd:
+    def test_invokes_dhcpcd_g(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.subprocess.run") as run:
+            run.return_value.returncode = 0
+            d._reconfigure_dhcpcd()
+
+        run.assert_called_once_with(
+            ["dhcpcd", "-g"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+    def test_logs_warning_on_failure_without_raising(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.subprocess.run") as run:
+            run.return_value.returncode = 1
+            run.return_value.stderr = b"dhcpcd: not running\n"
+            with patch("uplinkmgr.daemon.log") as log:
+                d._reconfigure_dhcpcd()  # must not raise
+
+        assert log.warning.called
 
 
 # ---------------------------------------------------------------------------

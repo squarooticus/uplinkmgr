@@ -503,7 +503,22 @@ Actions:
 
 **Note:** The hook ignores EXPIRE6/STOP6 events on macvlan interfaces — those fire co-temporally with the WAN EXPIRE6 and carry no additional state. All IPv6 routing cleanup (routes, rules) is performed by the daemon on SIGUSR1.
 
-#### 5.2.9 Hook Non-uplinkmgr Events
+#### 5.2.9 RECONFIGURE (WAN interface — `dhcpcd -g` replay)
+
+Triggered when: `$reason` is `RECONFIGURE` and `$interface` matches the WAN interface. This reason is fired by `dhcpcd -g`/`--reconfigure`, which asks an already-running dhcpcd to re-run `dhcpcd-run-hooks` for every interface's current state without renegotiating anything — used by the daemon at startup (see §5.3.8) to catch up on any hook events it missed while it wasn't running.
+
+The hook internally refactors the per-reason bodies of §5.2.4 (IPv4 BOUND-family), §5.2.6 (ROUTERADVERT), and §5.2.7 (BOUND6-family) into standalone functions (`_handle_ipv4_bound`, `_handle_routeradvert`, `_handle_ipv6_bound`), each already written to no-op safely when its relevant `new_*`/`nd1_*` variables are absent. `RECONFIGURE` calls all three unconditionally, then signals the daemon once:
+
+```sh
+_handle_ipv4_bound
+_handle_routeradvert
+_handle_ipv6_bound reconfigure
+_signal_daemon
+```
+
+**Exception — IA_NA state is never deleted during RECONFIGURE:** `_handle_ipv6_bound`'s normal (`BOUND6`/`RENEW6`/`REBIND6`) behavior deletes `ipv6na.state` if the IA_NA address variable is absent (§5.2.7) — correct for a real lease event, where "absent" means "no longer assigned." For `RECONFIGURE`, whether dhcpcd populates the IA_NA variable at all is unconfirmed (see §17); treating "absent" as "withdrawn" on an uncertain read-only catch-up pass would risk destroying valid existing state. `_handle_ipv6_bound` takes an optional `reconfigure` argument that skips the deletion branch when set.
+
+#### 5.2.10 Hook Non-uplinkmgr Events
 
 If the hook sources an env file and determines that `$interface` is the WAN interface but `$reason` is an unrecognized value, the hook exits 0 (no-op). The hook must **never** fail with a non-zero exit for unrecognized events — dhcpcd treats hook failures as errors.
 
@@ -645,13 +660,16 @@ On startup, the daemon:
 1. Reads the config file.
 2. Initializes all uplink states to `UP` (optimistic start — routes are assumed present).
 3. Writes the PID file (`/run/uplinkmgr/uplinkmgr.pid`).
-4. Installs the global IPv4 policy rules (`lookup main suppress_prefixlength 0` and `lookup uplinkmgr`) and the global IPv6 policy rule (`ip -6 rule add lookup main suppress_prefixlength 0`).
-5. Performs an initial reconcile pass over all state files: installs IPv4 and IPv6 routes and all ip -6 rules that correspond to existing state files.
-6. Begins the monitoring loop immediately (no delay).
+4. Runs `dhcpcd -g` (reconfigure) and waits for it to complete, asking the already-running dhcpcd to replay `dhcpcd-run-hooks` for every interface's current state. Logs a warning and continues on failure — this is a best-effort catch-up, not a hard startup dependency.
+5. Installs the global IPv4 policy rules (`lookup main suppress_prefixlength 0` and `lookup uplinkmgr`) and the global IPv6 policy rule (`ip -6 rule add lookup main suppress_prefixlength 0`).
+6. Performs an initial reconcile pass over all state files: installs IPv4 and IPv6 routes and all ip -6 rules that correspond to existing state files.
+7. Begins the monitoring loop immediately (no delay).
 
 The rationale for optimistic start: at boot, dhcpcd has been running and has configured routes before the daemon starts (see §12). The daemon should not deprovision anything until it has actually observed failures.
 
 The initial reconcile ensures that the daemon's in-memory tracking of installed routes and rules is accurate from startup, so subsequent SIGUSR1 and health-change events only apply the necessary delta.
+
+**Why step 4 is needed:** dhcpcd's hook events are edge-triggered — if a `ROUTERADVERT` or `BOUND6` event fires while uplinkmgr isn't running (e.g. it crashed, was restarted, or dhcpcd simply started first at boot), the corresponding `/run/uplinkmgr/*.state` file is still written correctly (the hook writes state before it signals the daemon), but the `SIGUSR1` notification is lost, and dhcpcd won't re-emit that event just because uplinkmgr later starts — it only fires again when something actually changes (a new RA, a rebind). Without step 4, the daemon's step 6 reconcile pass only picks up whatever was *already* written to disk by the time it runs; anything dhcpcd hasn't gotten around to yet, or already reported while uplinkmgr was down and hasn't had a reason to report again, stays missing until an unrelated future dhcpcd event happens to occur. `dhcpcd -g` closes this gap by forcing an immediate replay of hooks for dhcpcd's *current* state, once the daemon is ready to receive the resulting signals (steps 3 and 4 are ordered so the PID file and signal handlers are already in place before the replay's hook invocations can call `_signal_daemon()`).
 
 ---
 
@@ -1459,9 +1477,9 @@ Debian 13's `network-online.target` (and systemd's `wait-online` logic) will cau
 
 3. **`radvd-uplinkmgr-<name>.service` units start** (each depends on `dhcpcd.service`). radvd begins advertising prefixes on macvlan interfaces.
 
-4. **`uplinkmgr.service` starts** (depends on `dhcpcd.service`). The daemon begins monitoring. At this point, routes are already configured; the daemon's initial state is `UP` for all uplinks.
+4. **`uplinkmgr.service` starts** (depends on `dhcpcd.service`). The daemon begins monitoring. Since step 2's hook events may have fired (and written state files) before this step — while nothing was running to receive their `SIGUSR1` signals — the daemon first runs `dhcpcd -g` (see §5.3.8 step 4) to force dhcpcd to replay hooks for its current state now that the daemon is ready to receive them, then performs its startup reconcile pass. At this point, routes are already configured; the daemon's initial state is `UP` for all uplinks.
 
-**Result:** IPv4 connectivity is available as soon as dhcpcd obtains a lease on any uplink interface (step 2), long before the daemon starts. Debian's boot does not time out waiting for the network.
+**Result:** IPv4 connectivity is available as soon as dhcpcd obtains a lease on any uplink interface (step 2), long before the daemon starts. Debian's boot does not time out waiting for the network. The `dhcpcd -g` replay in step 4 closes the race where step 2's hook events fired before the daemon existed to act on them, so routing state settles on the daemon's very first reconcile pass rather than waiting for a later, unrelated dhcpcd event.
 
 ### 12.3 Route Redundancy at Boot
 
@@ -1793,6 +1811,7 @@ The following items require verification against upstream documentation or testi
 | 22 | radvd | ~~Whether the explicit `route ::/0 { ... }` stanza (RFC 4191 Route Information Option) adds anything beyond `AdvDefaultPreference`/`AdvDefaultLifetime`~~ **Resolved: redundant.** Per RFC 4191 §2.1, a Route Information Option for `::/0` conveys the same "this router, for this long, at this preference" information already carried by the RA header's own Router Lifetime/Preference fields, since `::/0` is definitionally the least-specific route possible. Removed entirely from generated radvd config, along with the now-fully-unused `route_lifetime`/`AdvRoutePreference`/`AdvRouteLifetime`. See §6.4, §11.6. | — |
 | 23 | radvd | ~~Whether zeroing `AdvDefaultLifetime` on DOWN takes effect via the existing SIGHUP-only transition path, or requires a full restart~~ **Resolved (per user direction):** SIGHUP is sufficient — the DOWN transition already relied on SIGHUP alone (`daemon.py` never calls `regenerate_all(..., action="restart")` for a state change) to apply `AdvPreferredLifetime 0`/`AdvValidLifetime 0` immediately, and `AdvDefaultLifetime` is rendered by the same `_radvd_interface_block()` call into the same config file, so it reloads via the identical mechanism. This corrects an earlier, narrower claim in §6.4 that a full restart was needed for lifetime changes — that claim did not hold given the DOWN transition's existing, already-shipped reliance on SIGHUP alone. See §6.4, §11.6. | — |
 | 24 | radvd | ~~Whether `exclusive_preferred_pd` should zero `AdvDefaultLifetime` for secondary UP uplinks, not just `AdvPreferredLifetime`~~ **Resolved (per user direction):** yes — the purpose of `exclusive_preferred_pd` is that only one uplink should ever be visible to clients at all, because RFC 6724 rule 5.5 (source/router selection matching outgoing interface) isn't implemented in most stacks yet; a client that never implemented it could still pick a merely-dispreferred secondary uplink as a default router. Secondary UP uplinks now get `AdvDefaultLifetime 0` in addition to `AdvPreferredLifetime 0` (`radvd.py`'s `is_secondary` check, extending the same zeroing already applied for `AdvPreferredLifetime`). See §9.6, §11.6. | — |
+| 25 | dhcpcd hook | ~~Whether a `dhcpcd -g`/`--reconfigure`-triggered `RECONFIGURE` hook invocation populates the same `new_*`/`nd1_*` variables as the corresponding real event (IPv4 routers/address, RA gateway/lifetime/prefix, DHCPv6 PD/IA_NA), for one variable group, several at once, or requires separate `-4`/`-6`-scoped invocations~~ **Unconfirmed, assumed defensive-safe:** `dhcpcd(8)`/`dhcpcd-run-hooks(8)` document the `-g` flag and `RECONFIGURE` reason but not its exact variable population. The hook's `RECONFIGURE` handler (§5.2.9) calls all three per-reason handlers unconditionally, and each independently no-ops when its own variables are absent, so it degrades gracefully regardless of the answer — but full replay coverage (the actual goal of §5.3.8 step 4) depends on it. To be verified by testing. | — |
 
 ---
 

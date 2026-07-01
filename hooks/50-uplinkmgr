@@ -44,18 +44,90 @@ _write_state_file() {
     printf "$@" > "$_tmp" && mv "$_tmp" "$_target"
 }
 
+# --- Per-reason handlers (also reused, in combination, for RECONFIGURE) ---
+
+# IPv4: write gateway state file. No-ops if no gateway is present.
+_handle_ipv4_bound() {
+    GW4="${new_routers%% *}"  # take first gateway
+    [ -n "$GW4" ] || return 0
+
+    mkdir -p "$UPLINKMGR_STATE_DIR"
+    _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv4.state" \
+        'gateway=%s\naddress=%s\n' "$GW4" "${new_ip_address:-}"
+}
+
+# IPv6 router advertisement: write gateway state file. No-ops if not wanted
+# or no RA gateway is present.
+_handle_routeradvert() {
+    [ "$UPLINKMGR_IPV6_PD" = true ] || [ "$UPLINKMGR_IPV6_IA_NA" = true ] || return 0
+
+    _debug_log "wants IPv6 PD or NA"
+
+    GW6="$nd1_from"
+    ND1_LIFETIME="${nd1_lifetime:-0}"
+    ND1_PREFIX="${nd1_prefix_information1_prefix:-}"
+    ND1_PLEN="${nd1_prefix_information1_length:-0}"
+
+    [ -n "$GW6" ] || return 0
+
+    _debug_log "has GW6 $GW6"
+
+    # M flag: DHCPv6 assigns addresses; address comes from IA_NA (ipv6na.state).
+    # No M flag: SLAAC; address is the kernel-assigned EUI64 address from the RA prefix.
+    case "$nd1_flags" in
+        *M*) SLAAC_ADDR="" ;;
+        *)   SLAAC_ADDR="${nd1_addr1:-}" ;;
+    esac
+
+    _debug_log "writing state file ${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state"
+
+    mkdir -p "$UPLINKMGR_STATE_DIR"
+    _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state" \
+        'gateway=%s\nlifetime=%s\ntimestamp=%s\naddress=%s\nprefix=%s\nplen=%s\n' \
+        "$GW6" "$ND1_LIFETIME" "$(date +%s)" "$SLAAC_ADDR" "$ND1_PREFIX" "$ND1_PLEN"
+}
+
+# IPv6 lease: write PD and IA_NA state files. No-ops per-file if the
+# relevant variables are absent. Pass "reconfigure" as $1 to skip deleting
+# ipv6na.state when its address is absent -- RECONFIGURE-reason invocations
+# aren't confirmed to populate IA_NA variables even when a valid address is
+# already assigned (see SPEC.md §17), and this handler must not destroy
+# existing state on an uncertain read-only catch-up pass.
+_handle_ipv6_bound() {
+    [ "$UPLINKMGR_IPV6_PD" = true ] || [ "$UPLINKMGR_IPV6_IA_NA" = true ] || return 0
+
+    _debug_log "wants IPv6 PD or NA"
+
+    DELEGATED_PREFIX="${new_dhcp6_ia_pd1_prefix1:-}"
+    DELEGATED_LENGTH="${new_dhcp6_ia_pd1_prefix1_length:-}"
+    VLTIME="${new_dhcp6_ia_pd1_prefix1_vltime:-}"
+    PLTIME="${new_dhcp6_ia_pd1_prefix1_pltime:-}"
+
+    if [ -n "$DELEGATED_PREFIX" ] && [ -n "$DELEGATED_LENGTH" ]; then
+        _debug_log "writing PD state file ${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
+        mkdir -p "$UPLINKMGR_STATE_DIR"
+        _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state" \
+            'delegated_prefix=%s\ndelegated_length=%s\nvltime=%s\npltime=%s\ntimestamp=%s\n' \
+            "$DELEGATED_PREFIX" "$DELEGATED_LENGTH" \
+            "$VLTIME" "$PLTIME" "$(date +%s)"
+    fi
+
+    if [ -n "$new_dhcp6_ia_na1_ia_addr1" ]; then
+        _debug_log "writing NA state file ${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
+        mkdir -p "$UPLINKMGR_STATE_DIR"
+        _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state" \
+            'address=%s\n' "$new_dhcp6_ia_na1_ia_addr1"
+    elif [ "$1" != "reconfigure" ]; then
+        rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
+    fi
+}
+
 # --- Dispatch ---
 
 case "$reason" in
 
-    # IPv4: write gateway state file and signal daemon
     BOUND|RENEW|REBIND|REBOOT)
-        GW4="${new_routers%% *}"  # take first gateway
-        [ -n "$GW4" ] || return 0
-
-        mkdir -p "$UPLINKMGR_STATE_DIR"
-        _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv4.state" \
-            'gateway=%s\naddress=%s\n' "$GW4" "${new_ip_address:-}"
+        _handle_ipv4_bound
         _signal_daemon
         ;;
 
@@ -64,67 +136,13 @@ case "$reason" in
         _signal_daemon
         ;;
 
-    # IPv6 router advertisement: write gateway state file and signal daemon
     ROUTERADVERT)
-        [ "$UPLINKMGR_IPV6_PD" = true ] || [ "$UPLINKMGR_IPV6_IA_NA" = true ] || return 0
-
-        _debug_log "wants IPv6 PD or NA"
-
-        GW6="$nd1_from"
-        ND1_LIFETIME="${nd1_lifetime:-0}"
-        ND1_PREFIX="${nd1_prefix_information1_prefix:-}"
-        ND1_PLEN="${nd1_prefix_information1_length:-0}"
-
-        [ -n "$GW6" ] || return 0
-
-        _debug_log "has GW6 $GW6"
-
-        # M flag: DHCPv6 assigns addresses; address comes from IA_NA (ipv6na.state).
-        # No M flag: SLAAC; address is the kernel-assigned EUI64 address from the RA prefix.
-        case "$nd1_flags" in
-            *M*) SLAAC_ADDR="" ;;
-            *)   SLAAC_ADDR="${nd1_addr1:-}" ;;
-        esac
-
-        _debug_log "writing state file ${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state"
-
-        mkdir -p "$UPLINKMGR_STATE_DIR"
-        _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state" \
-            'gateway=%s\nlifetime=%s\ntimestamp=%s\naddress=%s\nprefix=%s\nplen=%s\n' \
-            "$GW6" "$ND1_LIFETIME" "$(date +%s)" "$SLAAC_ADDR" "$ND1_PREFIX" "$ND1_PLEN"
-
+        _handle_routeradvert
         _signal_daemon
         ;;
 
-    # IPv6 lease: write PD and IA_NA state files and signal daemon
     BOUND6|RENEW6|REBIND6)
-        [ "$UPLINKMGR_IPV6_PD" = true ] || [ "$UPLINKMGR_IPV6_IA_NA" = true ] || return 0
-
-        _debug_log "wants IPv6 PD or NA"
-
-        DELEGATED_PREFIX="${new_dhcp6_ia_pd1_prefix1:-}"
-        DELEGATED_LENGTH="${new_dhcp6_ia_pd1_prefix1_length:-}"
-        VLTIME="${new_dhcp6_ia_pd1_prefix1_vltime:-}"
-        PLTIME="${new_dhcp6_ia_pd1_prefix1_pltime:-}"
-
-        if [ -n "$DELEGATED_PREFIX" ] && [ -n "$DELEGATED_LENGTH" ]; then
-            _debug_log "writing PD state file ${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
-            mkdir -p "$UPLINKMGR_STATE_DIR"
-            _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state" \
-                'delegated_prefix=%s\ndelegated_length=%s\nvltime=%s\npltime=%s\ntimestamp=%s\n' \
-                "$DELEGATED_PREFIX" "$DELEGATED_LENGTH" \
-                "$VLTIME" "$PLTIME" "$(date +%s)"
-        fi
-
-        if [ -n "$new_dhcp6_ia_na1_ia_addr1" ]; then
-            _debug_log "writing NA state file ${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
-            mkdir -p "$UPLINKMGR_STATE_DIR"
-            _write_state_file "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state" \
-                'address=%s\n' "$new_dhcp6_ia_na1_ia_addr1"
-        else
-            rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
-        fi
-
+        _handle_ipv6_bound
         _signal_daemon
         ;;
 
@@ -135,6 +153,17 @@ case "$reason" in
         rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6ra.state"
         rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6pd.state"
         rm -f "${UPLINKMGR_STATE_DIR}/${UPLINKMGR_UPLINK_NAME}.ipv6na.state"
+        _signal_daemon
+        ;;
+
+    # dhcpcd -g / --reconfigure: replay hooks for all current state, so
+    # uplinkmgr can catch up on anything it missed while it wasn't running
+    # to receive the original event's signal. Defensive: each handler
+    # no-ops on any variable group that isn't populated for this reason.
+    RECONFIGURE)
+        _handle_ipv4_bound
+        _handle_routeradvert
+        _handle_ipv6_bound reconfigure
         _signal_daemon
         ;;
 

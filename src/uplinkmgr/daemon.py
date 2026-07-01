@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -63,6 +64,7 @@ class Daemon:
         self._executor = ThreadPoolExecutor(max_workers=len(self._cfg.uplinks))
         self._write_pid()
         log.info("uplinkmgr started (pid %d)", os.getpid())
+        self._reconfigure_dhcpcd()
         self._setup_ipv4_rules()
         self._setup_ipv6_rules()
         self._reconcile_all()
@@ -70,6 +72,19 @@ class Daemon:
             self._loop()
         finally:
             self._cleanup()
+
+    def _reconfigure_dhcpcd(self) -> None:
+        """Ask the already-running dhcpcd to replay hooks for every interface's
+        current state, so uplinkmgr catches up on anything it missed while it
+        wasn't running to receive the original hook-triggered SIGUSR1."""
+        result = subprocess.run(
+            ["dhcpcd", "-g"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            log.warning("dhcpcd -g (reconfigure) failed: %s",
+                        result.stderr.decode().strip())
 
     def _loop(self) -> None:
         while self._running:
