@@ -12,9 +12,9 @@ override_dh_auto_install:
 	install -m 755 bin/uplinkmgr bin/uplinkmgr-setup \
 	    debian/uplinkmgr/usr/sbin/
 	# dhcpcd hook
-	install -d debian/uplinkmgr/lib/dhcpcd/dhcpcd-hooks
+	install -d debian/uplinkmgr/usr/libexec/dhcpcd-hooks
 	install -m 755 hooks/50-uplinkmgr \
-	    debian/uplinkmgr/lib/dhcpcd/dhcpcd-hooks/
+	    debian/uplinkmgr/usr/libexec/dhcpcd-hooks/
 	# Example config
 	install -d debian/uplinkmgr/etc/uplinkmgr
 	install -m 644 etc/uplinkmgr/uplinkmgr.yaml.example \

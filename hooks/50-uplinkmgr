@@ -1,6 +1,6 @@
 #!/bin/sh
 # dhcpcd exit hook for uplinkmgr
-# Installed at /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr
+# Installed at /usr/libexec/dhcpcd-hooks/50-uplinkmgr
 # Sourced by dhcpcd on every lease event.
 
 UPLINKMGR_ENV_DIR="${UPLINKMGR_ENV_DIR:-/etc/uplinkmgr/uplinks}"

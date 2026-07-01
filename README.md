@@ -37,7 +37,7 @@ delegates to existing tools rather than replacing them:
 - **dhcpcd** (package `dhcpcd`) handles DHCP and DHCPv6 on WAN interfaces,
   including requesting IPv6 prefix delegation and sub-delegating subnets to
   macvlan interfaces. uplinkmgr-setup generates `/etc/dhcpcd.conf`; the hook
-  at `/lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr` is the handoff point between
+  at `/usr/libexec/dhcpcd-hooks/50-uplinkmgr` is the handoff point between
   dhcpcd events and the daemon.
 
 - **radvd** sends Router Advertisements to internal networks. uplinkmgr-setup
@@ -57,7 +57,7 @@ uplinkmgr has three components:
    interface stanzas, radvd config files, routing table names, and systemd
    units for radvd instances.
 
-2. **dhcpcd hook** (`/lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr`) — sourced by
+2. **dhcpcd hook** (`/usr/libexec/dhcpcd-hooks/50-uplinkmgr`) — sourced by
    dhcpcd on every lease event. Writes compact state files to
    `/run/uplinkmgr/` (gateway IP, delegated prefix, RA lifetime) and sends
    `SIGUSR1` to the daemon to trigger reconciliation.

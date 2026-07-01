@@ -71,7 +71,7 @@ The design goal is to provide the following simultaneously:
 | **RA** | Router Advertisement — ICMPv6 message sent by radvd to announce prefixes, routes, and default gateway to clients. |
 | **SLAAC** | Stateless Address Autoconfiguration — the process by which IPv6 hosts derive addresses from RA-advertised prefixes. |
 | **AdvDefaultPreference** | radvd parameter controlling the preference level (high/medium/low) of the default route announced in RAs. |
-| **Hook** | The dhcpcd exit hook script `/lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr`, invoked by dhcpcd on every lease event. |
+| **Hook** | The dhcpcd exit hook script `/usr/libexec/dhcpcd-hooks/50-uplinkmgr`, invoked by dhcpcd on every lease event. |
 | **uplinkmgr-setup** | The one-shot provisioning tool that generates all configuration files from the YAML config. |
 | **uplinkmgr daemon** | The Python monitoring daemon that tracks uplink health and adjusts the main routing table and radvd configs at runtime. |
 
@@ -322,9 +322,9 @@ When `uplinkmgr-setup` runs, it removes any files from a previous run whose upli
 
 #### 5.2.1 Location
 
-`/lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr`
+`/usr/libexec/dhcpcd-hooks/50-uplinkmgr`
 
-This is a shell script installed by the Debian package. dhcpcd sources all files in `/lib/dhcpcd/dhcpcd-hooks/` in lexicographic order on every lease event. The `50-` prefix places it after dhcpcd's own built-in hooks (typically `01-test`, `20-resolv.conf`, `30-hostname`).
+This is a shell script installed by the Debian package. dhcpcd sources all files in `/usr/libexec/dhcpcd-hooks/` in lexicographic order on every lease event. The `50-` prefix places it after dhcpcd's own built-in hooks (typically `01-test`, `20-resolv.conf`, `30-hostname`).
 
 #### 5.2.2 Hook Environment
 
@@ -737,7 +737,7 @@ interface eth0
 interface eth1
     metric 200
 
-hook /lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr
+hook /usr/libexec/dhcpcd-hooks/50-uplinkmgr
 ```
 
 **Notes on dhcpcd config:**
@@ -1535,7 +1535,7 @@ Depends: python3 (>= 3.9), dhcpcd, radvd, iproute2, iputils-ping, ifupdown
 |------|------|
 | Daemon binary | `/usr/sbin/uplinkmgr` |
 | Setup binary | `/usr/sbin/uplinkmgr-setup` |
-| dhcpcd hook | `/lib/dhcpcd/dhcpcd-hooks/50-uplinkmgr` |
+| dhcpcd hook | `/usr/libexec/dhcpcd-hooks/50-uplinkmgr` |
 | systemd service | `/lib/systemd/system/uplinkmgr.service` |
 | Default config | `/etc/uplinkmgr/uplinkmgr.yaml` (not overwritten on upgrade) |
 | Debconf templates | `/usr/share/uplinkmgr/templates` |
