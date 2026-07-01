@@ -74,6 +74,13 @@ def dhcpcd_conf(cfg: Config, head: str = "", tail: str = "") -> str:
             lines.append("    duid")
         lines.append("")
 
+        if uplink.ipv6_pd:
+            for net_idx, net in enumerate(cfg.networks):
+                mv = naming.macvlan_name(net.interface, uplink.index)
+                lines.append(f"interface {mv}")
+                lines.append(f"    iaid {naming.macvlan_iaid(uplink.index, net_idx)}")
+                lines.append("")
+
     body = "\n".join(lines) + "\n"
 
     if head:

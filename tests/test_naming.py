@@ -3,7 +3,7 @@
 import pytest
 from uplinkmgr.config import NetworkConfig
 from uplinkmgr.naming import (
-    macvlan_name, mac_address, link_local,
+    macvlan_name, mac_address, macvlan_iaid, link_local,
     ipv4_table_num, ipv4_table_name,
     ipv6_table_num, ipv6_table_name,
     radvd_conf_path, radvd_template_unit_name, radvd_unit_name,
@@ -88,6 +88,25 @@ def test_mac_address_non_zero():
 
 def test_mac_address_max():
     assert mac_address(255, 255) == "52:ff:ff:00:00:00"
+
+
+# --- macvlan_iaid ---
+
+def test_macvlan_iaid_zeros():
+    assert macvlan_iaid(0, 0) == 0x1000
+
+
+def test_macvlan_iaid_non_zero():
+    assert macvlan_iaid(1, 2) == 0x1000 + (1 << 8) + 2
+
+
+def test_macvlan_iaid_unique_across_uplinks_same_network():
+    # Same net_idx (same network), different uplinks -> must differ.
+    assert macvlan_iaid(0, 0) != macvlan_iaid(1, 0)
+
+
+def test_macvlan_iaid_unique_across_networks_same_uplink():
+    assert macvlan_iaid(0, 0) != macvlan_iaid(0, 1)
 
 
 # --- link_local ---

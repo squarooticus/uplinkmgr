@@ -1,5 +1,7 @@
 """Tests for generator.py — config file content generation."""
 
+import re
+
 import pytest
 from tests.conftest import make_config, make_uplink, make_network
 from uplinkmgr.generator import (
@@ -100,6 +102,29 @@ def test_dhcpcd_allowinterfaces_wan_only_when_no_pd():
     out = dhcpcd_conf(cfg)
     assert "allowinterfaces eth0\n" in out
     assert "eth1-u0" not in out
+
+
+def test_dhcpcd_macvlan_interface_stanza_has_iaid():
+    cfg = make_config(
+        networks=[make_network("lan", "eth1")],
+        uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+    )
+    out = dhcpcd_conf(cfg)
+    assert "interface eth1-u0\n    iaid " in out
+
+
+def test_dhcpcd_macvlan_iaid_unique_across_uplinks_sharing_network():
+    cfg = make_config(
+        networks=[make_network("lan", "sfp0.100")],
+        uplinks=[
+            make_uplink("isp1", "eth0", index=0, ipv6_pd=True),
+            make_uplink("isp2", "eth1", index=1, ipv6_pd=True),
+        ],
+    )
+    out = dhcpcd_conf(cfg)
+    iaids = re.findall(r"^    iaid (\d+)$", out, re.MULTILINE)
+    assert len(iaids) == 2
+    assert len(set(iaids)) == 2
 
 
 # --- radvd_template_unit ---

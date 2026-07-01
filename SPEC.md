@@ -734,6 +734,12 @@ interface eth0
     ia_pd 2/::/56 vlan10-u0/0/64 vlan20-u0/1/64
     duid
 
+interface vlan10-u0
+    iaid 4096
+
+interface vlan20-u0
+    iaid 4097
+
 interface eth1
     metric 200
 
@@ -746,6 +752,7 @@ hook /usr/libexec/dhcpcd-hooks/50-uplinkmgr
 - `ia_na 1`: Requests an IPv6 address via DHCPv6 (IA_NA, IAID=1). Required for the WAN interface to have a routable IPv6 source address.
 - `ia_pd 2/::/56 …`: Requests prefix delegation (IAID=2) with a `/56` hint; sub-delegates sequential /64s to each macvlan by SLA ID (0-based, in network config-file order). The ISP may grant a different prefix length than the hint.
 - `duid`: Uses a DUID for DHCPv6, ensuring consistent lease and prefix assignment across restarts.
+- Each macvlan gets its own `interface <macvlan> { iaid ... }` stanza with an explicit, unique `iaid`. dhcpcd's default IAID is derived from the interface's VLAN ID (or, failing that, the last 4 bytes of its MAC address) — both of which are shared across every uplink's macvlan for the same network interface (they're all children of the same underlying VLAN device), so without an explicit `iaid` these macvlans collide on the same L2 segment. The value is `0x1000 + (uplink_index << 8) + network_index` (`naming.macvlan_iaid()`), guaranteeing uniqueness per (uplink, network) pair.
 - `metric`: Sets the metric for the IPv4 default route that dhcpcd adds to the main table.
 - `hook`: Explicitly loads the uplinkmgr hook so it runs for all managed interfaces.
 - IPv4-only uplinks omit `ipv6rs`, `ia_na`, `ia_pd`, and `duid`; only `metric` is needed.
@@ -1769,6 +1776,7 @@ The following items require verification against upstream documentation or testi
 | 16 | iproute2 | ~~Whether `ip -6 route replace … expires <seconds>` is valid syntax for setting route expiry in iproute2 on Debian 13 (Trixie)~~ **Confirmed:** correct syntax. | — |
 | 17 | radvd | ~~Whether radvd resets `DecrementLifetimes` counters to the config-file values on SIGHUP, or continues counting from where they were~~ **Confirmed:** SIGHUP does not reset counters; they continue decrementing from where they were. However, `DecrementLifetimes on` is not used: radvd advertises `min(configured_lifetime, address_lifetime_on_interface)`, and since dhcpcd keeps macvlan address lifetimes current, the interface address IS the countdown. `DecrementLifetimes off` is set universally; SIGHUP is sufficient for all radvd config updates including lifetime changes. | — |
 | 18 | radvd | ~~Whether empty `RDNSS { };` / `DNSSL { };` stanzas are valid radvd config~~ **Confirmed: not valid.** radvd rejects empty `RDNSS`/`DNSSL` blocks. Since uplinkmgr has no config option that ever populates DNS server or search-domain content, these stanzas are omitted from generated radvd config entirely rather than emitted empty. | — |
+| 19 | dhcpcd config | ~~Whether the default (unset) IAID is safe for macvlan interfaces~~ **Confirmed: not safe.** Per `dhcpcd.conf(5)`, the default IAID is derived from the interface's VLAN ID (or, failing that, the last 4 bytes of its MAC address); both are shared across every uplink's macvlan for a given network interface (all children of the same VLAN device), causing IAID collisions on the same L2 segment. Each macvlan now gets an explicit `interface <mv> { iaid ... }` stanza with a unique IAID (`naming.macvlan_iaid()`). See §6.2. | — |
 
 ---
 

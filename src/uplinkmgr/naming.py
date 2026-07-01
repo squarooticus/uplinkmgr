@@ -48,6 +48,18 @@ def mac_address(uplink_idx: int, net_idx: int) -> str:
     return f"52:{uplink_idx:02x}:{net_idx:02x}:00:00:00"
 
 
+def macvlan_iaid(uplink_idx: int, net_idx: int) -> int:
+    """Unique dhcpcd IAID for a macvlan interface's (uplink, network) pair.
+
+    dhcpcd's default IAID is derived from the interface's VLAN ID (or,
+    failing that, the last 4 bytes of its MAC address) -- both of which are
+    shared across every uplink's macvlan for the same network interface,
+    causing IAID collisions between macvlans on the same L2 segment. An
+    explicit, unique IAID must therefore be set per macvlan.
+    """
+    return 0x1000 + (uplink_idx << 8) + net_idx
+
+
 def link_local(uplink_idx: int) -> str:
     """Return the link-local address for all macvlan interfaces of an uplink."""
     return f"fe80::1:{uplink_idx+1}"
