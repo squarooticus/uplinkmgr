@@ -79,6 +79,7 @@ def dhcpcd_conf(cfg: Config, head: str = "", tail: str = "") -> str:
                 mv = naming.macvlan_name(net.interface, uplink.index)
                 lines.append(f"interface {mv}")
                 lines.append(f"    iaid {naming.macvlan_iaid(uplink.index, net_idx)}")
+                lines.append("    ipv6only")
                 lines.append("")
 
     body = "\n".join(lines) + "\n"

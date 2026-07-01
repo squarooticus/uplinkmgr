@@ -736,9 +736,11 @@ interface eth0
 
 interface vlan10-u0
     iaid 4096
+    ipv6only
 
 interface vlan20-u0
     iaid 4097
+    ipv6only
 
 interface eth1
     metric 200
@@ -753,6 +755,7 @@ hook /usr/libexec/dhcpcd-hooks/50-uplinkmgr
 - `ia_pd 2/::/56 …`: Requests prefix delegation (IAID=2) with a `/56` hint; sub-delegates sequential /64s to each macvlan by SLA ID (0-based, in network config-file order). The ISP may grant a different prefix length than the hint.
 - `duid`: Uses a DUID for DHCPv6, ensuring consistent lease and prefix assignment across restarts.
 - Each macvlan gets its own `interface <macvlan> { iaid ... }` stanza with an explicit, unique `iaid`. dhcpcd's default IAID is derived from the interface's VLAN ID (or, failing that, the last 4 bytes of its MAC address) — both of which are shared across every uplink's macvlan for the same network interface (they're all children of the same underlying VLAN device), so without an explicit `iaid` these macvlans collide on the same L2 segment. The value is `0x1000 + (uplink_index << 8) + network_index` (`naming.macvlan_iaid()`), guaranteeing uniqueness per (uplink, network) pair.
+- `ipv6only`: macvlans exist solely as IPv6-PD delegation targets, so this suppresses dhcpcd's default IPv4 handling on them (DHCP/ARP, and falling back to an IPv4 link-local/APIPA address on failure) — behavior that's pointless and noisy for an interface that only ever carries a delegated IPv6 `/64`. Scoped to macvlan stanzas only; WAN uplink stanzas are untouched since those may legitimately provide IPv4 connectivity.
 - `metric`: Sets the metric for the IPv4 default route that dhcpcd adds to the main table.
 - `hook`: Explicitly loads the uplinkmgr hook so it runs for all managed interfaces.
 - IPv4-only uplinks omit `ipv6rs`, `ia_na`, `ia_pd`, and `duid`; only `metric` is needed.
@@ -1791,6 +1794,7 @@ The following items require verification against upstream documentation or testi
 | 18 | radvd | ~~Whether empty `RDNSS { };` / `DNSSL { };` stanzas are valid radvd config~~ **Confirmed: not valid.** radvd rejects empty `RDNSS`/`DNSSL` blocks. Since uplinkmgr has no config option that ever populates DNS server or search-domain content, these stanzas are omitted from generated radvd config entirely rather than emitted empty. | — |
 | 19 | dhcpcd config | ~~Whether the default (unset) IAID is safe for macvlan interfaces~~ **Confirmed: not safe.** Per `dhcpcd.conf(5)`, the default IAID is derived from the interface's VLAN ID (or, failing that, the last 4 bytes of its MAC address); both are shared across every uplink's macvlan for a given network interface (all children of the same VLAN device), causing IAID collisions on the same L2 segment. Each macvlan now gets an explicit `interface <mv> { iaid ... }` stanza with a unique IAID (`naming.macvlan_iaid()`). See §6.2. | — |
 | 20 | radvd | ~~Whether an unbounded, continuously-decaying `AdvDefaultLifetime` is valid~~ **Confirmed: not valid.** Per `radvd.conf(5)`, `AdvDefaultLifetime` must be either exactly `0` or between `MaxRtrAdvInterval` (radvd default: 600s, previously never overridden here) and 9000 seconds; the live remaining-lifetime value decays continuously and routinely lands in the forbidden 1-second-to-floor gap. Fixed by explicitly setting `MaxRtrAdvInterval 300;` and clamping `AdvDefaultLifetime`/`AdvRouteLifetime` to `0` or `[300, 9000]` (`generator._clamp_default_lifetime()`). **Known follow-up, deliberately deferred:** the `lifetime == 0` "infinite" sentinel (§5.3.3) is indistinguishable from a genuinely-expired `0` in this clamp and passes through unclamped as `0`, which radvd reads as "not a default router" rather than "infinite" — not addressed by this fix. See §6.4, §11.6. | — |
+| 21 | dhcpcd config | ~~Whether dhcpcd needs to be told macvlan interfaces are IPv6-only~~ **Confirmed: yes.** Per `dhcpcd.conf(5)`, `ipv6only` ("Only configure IPv6") is a valid bare per-interface directive. Without it, dhcpcd applies its default per-interface behavior to macvlans too, including IPv4 DHCP/ARP and falling back to an IPv4 link-local (APIPA) address on failure — unwanted for interfaces that only ever carry a delegated IPv6 `/64`. Added to every macvlan `interface` stanza (not the WAN uplink stanzas). See §6.2. | — |
 
 ---
 

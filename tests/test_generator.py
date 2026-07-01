@@ -113,6 +113,18 @@ def test_dhcpcd_macvlan_interface_stanza_has_iaid():
     assert "interface eth1-u0\n    iaid " in out
 
 
+def test_dhcpcd_macvlan_interface_stanza_has_ipv6only():
+    cfg = make_config(
+        networks=[make_network("lan", "eth1")],
+        uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+    )
+    out = dhcpcd_conf(cfg)
+    assert "\n    ipv6only\n" in out
+    # WAN uplink stanza must not get ipv6only -- it may carry IPv4 too.
+    wan_stanza = out.split("interface eth0")[1].split("interface eth1-u0")[0]
+    assert "ipv6only" not in wan_stanza
+
+
 def test_dhcpcd_macvlan_iaid_unique_across_uplinks_sharing_network():
     cfg = make_config(
         networks=[make_network("lan", "sfp0.100")],
