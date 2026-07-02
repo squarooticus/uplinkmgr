@@ -22,8 +22,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_STATE_DIR = "/run/uplinkmgr"
 PID_FILE_NAME = "uplinkmgr.pid"
-
-_MISSING = object()  # sentinel for "never installed" in macvlan_fwd dict
+_DHCPCD_PID_FILE = "/run/dhcpcd/pid"  # dhcpcd(8) FILES: PID of the manager-mode instance
 
 
 @dataclass
@@ -67,6 +66,7 @@ class Daemon:
         self._reconfigure_dhcpcd()
         self._setup_ipv4_rules()
         self._setup_ipv6_rules()
+        self._setup_ipv6_macvlan_rules()
         self._reconcile_all()
         try:
             self._loop()
@@ -74,17 +74,46 @@ class Daemon:
             self._cleanup()
 
     def _reconfigure_dhcpcd(self) -> None:
-        """Ask the already-running dhcpcd to replay hooks for every interface's
+        """Ask an already-running dhcpcd to replay hooks for every interface's
         current state, so uplinkmgr catches up on anything it missed while it
-        wasn't running to receive the original hook-triggered SIGUSR1."""
-        result = subprocess.run(
-            ["dhcpcd", "-g"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+        wasn't running to receive the original hook-triggered SIGUSR1.
+
+        Skipped if dhcpcd isn't running yet: there's nothing to catch up on,
+        and dhcpcd's CLI may fall back to starting a fresh master process
+        (using the system default config, not ours) when no live master is
+        found to reconfigure -- see SPEC.md §17."""
+        if not self._dhcpcd_is_running():
+            log.debug("dhcpcd not running yet; skipping reconfigure")
+            return
+        try:
+            result = subprocess.run(
+                ["dhcpcd", "-g"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("dhcpcd -g (reconfigure) timed out")
+            return
         if result.returncode != 0:
             log.warning("dhcpcd -g (reconfigure) failed: %s",
                         result.stderr.decode().strip())
+
+    @staticmethod
+    def _dhcpcd_is_running() -> bool:
+        try:
+            pid = int(Path(_DHCPCD_PID_FILE).read_text().strip())
+        except (OSError, ValueError):
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False  # pid no longer exists -- stale pid file
+        except PermissionError:
+            return True  # pid exists, we just can't signal it (e.g. owned by root)
+        except OSError:
+            return False
+        return True
 
     def _loop(self) -> None:
         while self._running:
@@ -160,6 +189,7 @@ class Daemon:
         self._init_states()
         self._setup_ipv4_rules()
         self._setup_ipv6_rules()
+        self._setup_ipv6_macvlan_rules()
         self._reconcile_all()
         log.info("config reloaded; all uplink states reset to UP")
 
@@ -316,6 +346,24 @@ class Daemon:
         )
         self._ipv6_rule_installed = True
 
+    def _setup_ipv6_macvlan_rules(self) -> None:
+        """Install the per-macvlan fwd_to_uplink rule for every (uplink,
+        network) pair once, unconditionally, at startup. Never torn down
+        while the daemon runs -- only _reconcile_macvlan_rules() narrows it
+        further as PD state becomes known; full removal is _teardown_all()'s
+        job (daemon shutdown or config reload)."""
+        cfg = self._cfg
+        for uplink in cfg.uplinks:
+            if not uplink.ipv6_pd:
+                continue
+            installed = self._installed[uplink.name]
+            tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
+            for net_idx, net in enumerate(cfg.networks):
+                mv = naming.macvlan_name(net.interface, uplink.index)
+                fwd_prio = priority.ipv6_fwd_to_uplink_priority(cfg, uplink.index, net_idx)
+                routing.add_ipv6_fwd_to_uplink_rule(mv, tbl, fwd_prio, None)
+                installed.macvlan_fwd[mv] = None
+
     def _reconcile_all(self) -> None:
         for uplink in self._cfg.uplinks:
             self._reconcile_uplink_ipv4(uplink)
@@ -412,11 +460,14 @@ class Daemon:
                 )
             installed.lo_to_uplink_prefix = uplink_prefix
 
-        # Per-macvlan rules: driven by pd_st presence
+        # Per-macvlan rules: fwd_to_uplink is static (installed once at
+        # startup, see _setup_ipv6_macvlan_rules) -- only its from-constraint
+        # is updated here as PD state changes. The reject_wrong_pd_src
+        # prohibit rule remains driven by PD state presence.
         if pd_st is not None:
             self._reconcile_macvlan_rules(uplink, pd_st, tbl, installed)
         else:
-            self._teardown_macvlan_rules(uplink, installed)
+            self._teardown_macvlan_prohibit_rules(uplink, installed)
 
     def _reconcile_macvlan_rules(self, uplink: UplinkConfig, ipv6pd_st: IPv6PdState,
                                    ipv6_tbl: int, installed: _UplinkRouting) -> None:
@@ -429,12 +480,10 @@ class Daemon:
             mv = naming.macvlan_name(net.interface, uplink.index)
             fwd_prio = priority.ipv6_fwd_to_uplink_priority(cfg, uplink.index, net_idx)
 
-            # fwd_to_uplink: reinstall only when prefix constraint changes
-            current_fwd = installed.macvlan_fwd.get(mv, _MISSING)
-            if current_fwd is _MISSING:
-                routing.add_ipv6_fwd_to_uplink_rule(mv, ipv6_tbl, fwd_prio, delegated)
-                installed.macvlan_fwd[mv] = delegated
-            elif current_fwd != delegated:
+            # fwd_to_uplink always already exists (installed by
+            # _setup_ipv6_macvlan_rules); only replace it in place when its
+            # from-constraint changes.
+            if installed.macvlan_fwd.get(mv) != delegated:
                 routing.del_ipv6_rule(fwd_prio)
                 routing.add_ipv6_fwd_to_uplink_rule(mv, ipv6_tbl, fwd_prio, delegated)
                 installed.macvlan_fwd[mv] = delegated
@@ -447,8 +496,25 @@ class Daemon:
                     routing.add_ipv6_reject_wrong_pd_src_rule(mv, prohibit_prio)
                     installed.macvlan_prohibit.add(mv)
 
+    def _teardown_macvlan_prohibit_rules(self, uplink: UplinkConfig,
+                                          installed: _UplinkRouting) -> None:
+        """Remove only the reject_wrong_pd_src prohibit rules for one uplink,
+        when its PD state disappears. fwd_to_uplink is left untouched -- it's
+        static for the daemon's lifetime; see _reconcile_uplink_ipv6."""
+        cfg = self._cfg
+        for net_idx, net in enumerate(cfg.networks):
+            mv = naming.macvlan_name(net.interface, uplink.index)
+            if mv in installed.macvlan_prohibit:
+                routing.del_ipv6_rule(
+                    priority.ipv6_reject_wrong_pd_src_priority(cfg, uplink.index, net_idx)
+                )
+                installed.macvlan_prohibit.discard(mv)
+
     def _teardown_macvlan_rules(self, uplink: UplinkConfig,
                                  installed: _UplinkRouting) -> None:
+        """Remove all macvlan rules (fwd_to_uplink + prohibit) for one
+        uplink. Used only by _teardown_all() (daemon shutdown or config
+        reload) -- fwd_to_uplink is otherwise static while the daemon runs."""
         cfg = self._cfg
         for net_idx, net in enumerate(cfg.networks):
             mv = naming.macvlan_name(net.interface, uplink.index)

@@ -27,31 +27,111 @@ def _make_daemon(cfg, tmp_path) -> Daemon:
 # ---------------------------------------------------------------------------
 
 class TestReconfigureDhcpcd:
-    def test_invokes_dhcpcd_g(self, tmp_path):
+    def test_invokes_dhcpcd_g_when_dhcpcd_running(self, tmp_path):
         cfg = make_config()
         d = _make_daemon(cfg, tmp_path)
 
-        with patch("uplinkmgr.daemon.subprocess.run") as run:
-            run.return_value.returncode = 0
-            d._reconfigure_dhcpcd()
+        with patch.object(Daemon, "_dhcpcd_is_running", return_value=True):
+            with patch("uplinkmgr.daemon.subprocess.run") as run:
+                run.return_value.returncode = 0
+                d._reconfigure_dhcpcd()
 
         run.assert_called_once_with(
             ["dhcpcd", "-g"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            timeout=10,
         )
 
     def test_logs_warning_on_failure_without_raising(self, tmp_path):
         cfg = make_config()
         d = _make_daemon(cfg, tmp_path)
 
-        with patch("uplinkmgr.daemon.subprocess.run") as run:
-            run.return_value.returncode = 1
-            run.return_value.stderr = b"dhcpcd: not running\n"
-            with patch("uplinkmgr.daemon.log") as log:
-                d._reconfigure_dhcpcd()  # must not raise
+        with patch.object(Daemon, "_dhcpcd_is_running", return_value=True):
+            with patch("uplinkmgr.daemon.subprocess.run") as run:
+                run.return_value.returncode = 1
+                run.return_value.stderr = b"dhcpcd: not running\n"
+                with patch("uplinkmgr.daemon.log") as log:
+                    d._reconfigure_dhcpcd()  # must not raise
 
         assert log.warning.called
+
+    def test_skips_when_dhcpcd_not_running(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch.object(Daemon, "_dhcpcd_is_running", return_value=False):
+            with patch("uplinkmgr.daemon.subprocess.run") as run:
+                d._reconfigure_dhcpcd()
+
+        run.assert_not_called()
+
+    def test_timeout_logs_warning_without_raising(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch.object(Daemon, "_dhcpcd_is_running", return_value=True):
+            with patch("uplinkmgr.daemon.subprocess.run",
+                       side_effect=subprocess.TimeoutExpired(cmd="dhcpcd -g", timeout=10)):
+                with patch("uplinkmgr.daemon.log") as log:
+                    d._reconfigure_dhcpcd()  # must not raise
+
+        assert log.warning.called
+
+
+class TestDhcpcdIsRunning:
+    def test_true_when_pid_file_has_live_pid(self, tmp_path):
+        with patch("uplinkmgr.daemon.Path") as MockPath:
+            MockPath.return_value.read_text.return_value = "12345\n"
+            with patch("uplinkmgr.daemon.os.kill") as kill:
+                assert Daemon._dhcpcd_is_running() is True
+        kill.assert_called_once_with(12345, 0)
+
+    def test_false_when_pid_file_absent(self, tmp_path):
+        with patch("uplinkmgr.daemon.Path") as MockPath:
+            MockPath.return_value.read_text.side_effect = OSError("no such file")
+            assert Daemon._dhcpcd_is_running() is False
+
+    def test_false_when_pid_file_malformed(self, tmp_path):
+        with patch("uplinkmgr.daemon.Path") as MockPath:
+            MockPath.return_value.read_text.return_value = "not-a-pid\n"
+            assert Daemon._dhcpcd_is_running() is False
+
+    def test_false_when_pid_stale(self, tmp_path):
+        with patch("uplinkmgr.daemon.Path") as MockPath:
+            MockPath.return_value.read_text.return_value = "12345\n"
+            with patch("uplinkmgr.daemon.os.kill", side_effect=ProcessLookupError()):
+                assert Daemon._dhcpcd_is_running() is False
+
+    def test_true_when_pid_exists_but_unsignallable(self, tmp_path):
+        # os.kill(pid, 0) raises PermissionError when the process exists but
+        # is owned by a different user (e.g. dhcpcd running as root while
+        # this check runs as a less-privileged user) -- that confirms
+        # existence, it doesn't deny it.
+        with patch("uplinkmgr.daemon.Path") as MockPath:
+            MockPath.return_value.read_text.return_value = "12345\n"
+            with patch("uplinkmgr.daemon.os.kill", side_effect=PermissionError()):
+                assert Daemon._dhcpcd_is_running() is True
+
+
+# ---------------------------------------------------------------------------
+# _do_reload
+# ---------------------------------------------------------------------------
+
+class TestDoReload:
+    def test_reload_reinstalls_static_macvlan_fwd_to_uplink_rules(self, tmp_path):
+        cfg = make_config(
+            networks=[make_network("lan", "eth1")],
+            uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+        )
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.load_config", return_value=cfg):
+            with patch("uplinkmgr.daemon.routing") as r:
+                d._do_reload()
+
+        r.add_ipv6_fwd_to_uplink_rule.assert_called_once()
+        assert d._installed["isp"].macvlan_fwd["eth1-u0"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -158,40 +238,95 @@ class TestReconcileIPv6:
         r.del_ipv6_route.assert_called_once()
         assert not d._installed["isp"].ipv6_route_installed
 
-    def test_pd_state_installs_fwd_to_uplink_rules(self, tmp_path):
+    def test_setup_installs_fwd_to_uplink_rule_for_every_macvlan(self, tmp_path):
+        # fwd_to_uplink is static: installed once at startup by
+        # _setup_ipv6_macvlan_rules, with no state files present at all.
         cfg = make_config(
             networks=[make_network("lan", "eth1")],
             uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
         )
-        write_state(tmp_path, "isp", "ipv6ra", {
-            "gateway": "fe80::1", "lifetime": "0",
-            "timestamp": "0", "address": "", "prefix": "", "plen": "0",
-        })
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.routing") as r:
+            d._setup_ipv6_macvlan_rules()
+
+        r.add_ipv6_fwd_to_uplink_rule.assert_called_once()
+        mv, tbl, prio, prefix = r.add_ipv6_fwd_to_uplink_rule.call_args.args
+        assert mv == "eth1-u0"
+        assert prefix is None
+        assert d._installed["isp"].macvlan_fwd["eth1-u0"] is None
+
+    def test_pd_state_with_reject_wrong_pd_src_narrows_fwd_to_uplink_rule(self, tmp_path):
+        cfg = make_config(
+            networks=[make_network("lan", "eth1")],
+            uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+            reject_wrong_pd_src=True,
+        )
         write_state(tmp_path, "isp", "ipv6pd", {
             "delegated_prefix": "2001:db8::", "delegated_length": "56",
             "vltime": "86400", "pltime": "14400", "timestamp": "1000000",
         })
         d = _make_daemon(cfg, tmp_path)
+        d._installed["isp"].macvlan_fwd["eth1-u0"] = None  # as installed by setup
 
         with patch("uplinkmgr.daemon.routing") as r:
             d._reconcile_uplink_ipv6(cfg.uplinks[0])
 
+        r.del_ipv6_rule.assert_called_once()
         r.add_ipv6_fwd_to_uplink_rule.assert_called_once()
-        assert "eth1-u0" in d._installed["isp"].macvlan_fwd
+        assert d._installed["isp"].macvlan_fwd["eth1-u0"] == "2001:db8::/56"
 
-    def test_pd_state_absent_after_install_removes_macvlan_rules(self, tmp_path):
+    def test_pd_state_absent_after_install_persists_fwd_to_uplink_rule(self, tmp_path):
         cfg = make_config(
             networks=[make_network("lan", "eth1")],
             uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
         )
         d = _make_daemon(cfg, tmp_path)
-        d._installed["isp"].macvlan_fwd["eth1-u0"] = None
+        d._installed["isp"].macvlan_fwd["eth1-u0"] = None  # as installed by setup
 
         with patch("uplinkmgr.daemon.routing") as r:
             d._reconcile_uplink_ipv6(cfg.uplinks[0])
 
-        r.del_ipv6_rule.assert_called()
-        assert "eth1-u0" not in d._installed["isp"].macvlan_fwd
+        r.del_ipv6_rule.assert_not_called()
+        r.add_ipv6_fwd_to_uplink_rule.assert_not_called()
+        assert "eth1-u0" in d._installed["isp"].macvlan_fwd
+
+    def test_pd_state_absent_removes_prohibit_rule_but_not_fwd_to_uplink(self, tmp_path):
+        cfg = make_config(
+            networks=[make_network("lan", "eth1")],
+            uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+            reject_wrong_pd_src=True,
+        )
+        d = _make_daemon(cfg, tmp_path)
+        d._installed["isp"].macvlan_fwd["eth1-u0"] = "2001:db8::/56"
+        d._installed["isp"].macvlan_prohibit.add("eth1-u0")
+
+        with patch("uplinkmgr.daemon.routing") as r:
+            d._reconcile_uplink_ipv6(cfg.uplinks[0])
+
+        r.del_ipv6_rule.assert_called_once()
+        assert "eth1-u0" in d._installed["isp"].macvlan_fwd
+        assert "eth1-u0" not in d._installed["isp"].macvlan_prohibit
+
+    def test_pd_prefix_rotation_replaces_fwd_to_uplink_in_place(self, tmp_path):
+        cfg = make_config(
+            networks=[make_network("lan", "eth1")],
+            uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)],
+            reject_wrong_pd_src=True,
+        )
+        write_state(tmp_path, "isp", "ipv6pd", {
+            "delegated_prefix": "2001:db8:bbbb::", "delegated_length": "56",
+            "vltime": "86400", "pltime": "14400", "timestamp": "1000000",
+        })
+        d = _make_daemon(cfg, tmp_path)
+        d._installed["isp"].macvlan_fwd["eth1-u0"] = "2001:db8:aaaa::/56"
+
+        with patch("uplinkmgr.daemon.routing") as r:
+            d._reconcile_uplink_ipv6(cfg.uplinks[0])
+
+        r.del_ipv6_rule.assert_called_once()
+        r.add_ipv6_fwd_to_uplink_rule.assert_called_once()
+        assert d._installed["isp"].macvlan_fwd["eth1-u0"] == "2001:db8:bbbb::/56"
 
     def test_reject_wrong_pd_src_installs_prohibit_rules(self, tmp_path):
         cfg = make_config(
