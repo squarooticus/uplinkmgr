@@ -446,3 +446,65 @@ class TestCleanup:
 
         states = mock_radvd.regenerate_all.call_args[1]["states"]
         assert states["isp"].ipv6 == LinkState.UP
+
+
+# ---------------------------------------------------------------------------
+# _probe_uplink
+# ---------------------------------------------------------------------------
+
+class TestProbeUplink:
+    def test_probes_ipv6_even_with_no_route_state(self, tmp_path):
+        """No ipv6ra.state file at all -- previously this would have skipped
+        the IPv6 probe entirely; now it must still run and let the kernel's
+        own routing (including fallback to the main table) decide reachability."""
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)])
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.monitor") as m:
+            m.probe_ipv4.return_value = True
+            m.probe_ipv6.return_value = False
+            name, ipv4_ok, ipv6_ok, ipv6_probe_enabled = d._probe_uplink(cfg.uplinks[0])
+
+        m.probe_ipv6.assert_called_once()
+        assert ipv6_probe_enabled is True
+        assert ipv6_ok is False
+        assert name == "isp"
+        assert ipv4_ok is True
+
+    def test_skips_ipv6_probe_when_uplink_has_no_ipv6(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0,
+                                                 ipv6_pd=False, ia_na=False)])
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.monitor") as m:
+            m.probe_ipv4.return_value = True
+            name, ipv4_ok, ipv6_ok, ipv6_probe_enabled = d._probe_uplink(cfg.uplinks[0])
+
+        m.probe_ipv6.assert_not_called()
+        assert ipv6_probe_enabled is False
+        assert ipv6_ok is True  # default, unused by sm_update when disabled
+
+    def test_probes_ipv6_for_ia_na_only_uplink(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0,
+                                                 ipv6_pd=False, ia_na=True)])
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.monitor") as m:
+            m.probe_ipv4.return_value = True
+            m.probe_ipv6.return_value = True
+            _, _, ipv6_ok, ipv6_probe_enabled = d._probe_uplink(cfg.uplinks[0])
+
+        m.probe_ipv6.assert_called_once()
+        assert ipv6_probe_enabled is True
+        assert ipv6_ok is True
+
+    def test_ipv4_always_probed_regardless_of_ipv6_config(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0,
+                                                 ipv6_pd=False, ia_na=False)])
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.monitor") as m:
+            m.probe_ipv4.return_value = False
+            d._probe_uplink(cfg.uplinks[0])
+
+        m.probe_ipv4.assert_called_once()

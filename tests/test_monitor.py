@@ -75,30 +75,3 @@ def test_probe_ipv6_all_fail():
         result = monitor.probe_ipv6("eth0", ["2001:4860:4860::8888"], count=2)
     assert result is False
     assert m.call_count == 2
-
-
-# --- ipv6_default_route_exists ---
-
-def test_ipv6_default_route_exists_true():
-    with patch("uplinkmgr.monitor.subprocess.run") as m:
-        m.return_value.stdout = b"default via fe80::1 dev eth0\n"
-        result = monitor.ipv6_default_route_exists(161, "eth0")
-    assert result is True
-    cmd = m.call_args[0][0]
-    assert "161" in cmd
-    assert "eth0" in cmd
-    assert "default" in cmd
-
-
-def test_ipv6_default_route_exists_false():
-    with patch("uplinkmgr.monitor.subprocess.run") as m:
-        m.return_value.stdout = b""
-        result = monitor.ipv6_default_route_exists(161, "eth0")
-    assert result is False
-
-
-def test_ipv6_default_route_exists_whitespace_only():
-    with patch("uplinkmgr.monitor.subprocess.run") as m:
-        m.return_value.stdout = b"   \n"
-        result = monitor.ipv6_default_route_exists(161, "eth0")
-    assert result is False

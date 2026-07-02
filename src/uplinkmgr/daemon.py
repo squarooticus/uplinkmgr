@@ -264,20 +264,14 @@ class Daemon:
 
     def _probe_uplink(self, uplink: UplinkConfig) -> tuple:
         cfg = self._cfg
-        tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
         count = cfg.monitor.ping_count
 
         ipv4_ok = monitor.probe_ipv4(uplink.interface, cfg.monitor.v4_hosts, count)
 
+        ipv6_probe_enabled = uplink.ipv6_pd or uplink.ia_na
         ipv6_ok = True
-        ipv6_probe_enabled = False
-        if uplink.ipv6_pd or uplink.ia_na:
-            if monitor.ipv6_default_route_exists(tbl, uplink.interface):
-                ipv6_probe_enabled = True
-                ipv6_ok = monitor.probe_ipv6(uplink.interface, cfg.monitor.v6_hosts, count)
-            else:
-                log.debug("%s ipv6: no default route in table %d, skipping probe",
-                          uplink.name, tbl)
+        if ipv6_probe_enabled:
+            ipv6_ok = monitor.probe_ipv6(uplink.interface, cfg.monitor.v6_hosts, count)
 
         return uplink.name, ipv4_ok, ipv6_ok, ipv6_probe_enabled
 

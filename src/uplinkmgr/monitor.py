@@ -32,14 +32,3 @@ def probe_ipv6(wan_iface: str, hosts: Sequence[str], count: int) -> bool:
             if result.returncode == 0:
                 return True
     return False
-
-
-def ipv6_default_route_exists(table_num: int, wan_iface: str) -> bool:
-    """Return True if the per-uplink table has an IPv6 default route."""
-    result = subprocess.run(
-        ["ip", "-6", "route", "show", "table", str(table_num), "default",
-         "dev", wan_iface],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    return bool(result.stdout.strip())
