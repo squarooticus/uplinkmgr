@@ -343,6 +343,14 @@ When dhcpcd invokes the hook, the following environment variables are set by dhc
 
 > **Verification item:** Confirm the exact variable names for IPv6 PD events in dhcpcd 10.x. The variables `$new_ip6_prefix` and `$new_ip6_prefixlen` appear in dhcpcd documentation but must be verified against the installed version on Debian 13 (Trixie) (dhcpcd 10.1). See §17.
 
+Before identifying the uplink, the hook sources `${UPLINKMGR_STATE_DIR}/debug.env` if present:
+
+```sh
+[ -f "${UPLINKMGR_STATE_DIR}/debug.env" ] && . "${UPLINKMGR_STATE_DIR}/debug.env"
+```
+
+This file is written by the daemon (§5.3.3, §5.3.8) only when it's running at `--log-level DEBUG`; it sets `UPLINKMGR_HOOK_LOG=<path>`, which activates the hook's own `_debug_log()` logging for the rest of this invocation — a per-event banner (timestamp, `$reason`, `$interface`), a full dump of the sourced environment, and a line for every action the hook itself takes (e.g. `+ kill -USR1 <pid>` when signalling the daemon), all appended to that path. Since the hook runs as a fresh process per dhcpcd lease event, this file is the only channel it has to learn the daemon's current log level.
+
 #### 5.2.3 Identifying the Uplink
 
 The hook identifies which uplink it is running for by sourcing the per-uplink env file:
@@ -551,7 +559,7 @@ The daemon runs in the foreground; systemd handles daemonization.
 CLI flags:
 - `--config PATH` — config file path (default `/etc/uplinkmgr/uplinkmgr.yaml`).
 - `--state-dir DIR` — runtime state directory (default `/run/uplinkmgr`).
-- `--log-level {DEBUG,INFO,WARNING,ERROR}` — logging level (default `INFO`).
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` — logging level (default `INFO`). At `DEBUG`, every external command the daemon runs (`ip`, `systemctl`, `ping`/`ping6`, `dhcpcd -g`) is logged as a copy-pasteable bash command line (`+ <cmd>`, quoted only where the shell requires it), and the daemon signals the dhcpcd hook to log its own actions too (see `debug.env` in §5.3.3, and §5.2.2). Toggling requires a restart — there is no live/signal-based way to change the level.
 - `--log-clean` — use a minimal log format: `LEVEL message`, e.g.
   `INFO uplink isp1 transitioned UP -> DOWN`, instead of the default
   `%(asctime)s uplinkmgr %(levelname)s %(message)s`. Intended for running
@@ -572,6 +580,8 @@ The daemon reads and writes:
 - `<uplink-name>.ipv6pd.state` — written by the hook on WAN BOUND6/RENEW6; key=value lines: `delegated_prefix`, `delegated_length`, `vltime`, `pltime`, `timestamp`. The daemon derives per-macvlan /64 prefixes from `delegated_prefix`/`delegated_length` using each network's SLA ID, installs macvlan ip -6 rules, and uses `vltime`/`pltime` to populate `AdvValidLifetime` and `AdvPreferredLifetime`.
 - `<uplink-name>.ipv6na.state` — written by the hook on WAN BOUND6/RENEW6 when `$new_ip6_address` is set; key=value line: `address`. The daemon reads this for managed networks to install the `lo_to_uplink` ip -6 rule (`from <ia-na>/128 iif lo lookup <table>`). For unmanaged (SLAAC) networks the rule uses the RA prefix/plen from `ipv6ra.state` instead.
 - `uplinkmgr.pid` — written by the daemon at startup; contains the daemon PID. The hook uses this to send SIGUSR1 when new state arrives.
+- `debug.env` — written by the daemon at startup iff `--log-level DEBUG` is in effect (`log.isEnabledFor(logging.DEBUG)` on the daemon's own logger), removed otherwise; a single `UPLINKMGR_HOOK_LOG=<path>` line. The hook (a separate process per dhcpcd lease event, with no other channel to learn the daemon's log level) sources this file if present, which activates its own `UPLINKMGR_HOOK_LOG`/`_debug_log()` logging (§5.2.2).
+- `hook.log` — the path named by `debug.env`'s `UPLINKMGR_HOOK_LOG`; the hook appends a per-invocation banner (timestamp, `reason`, `interface`), the full sourced environment, and its own actions (e.g. `+ kill -USR1 <pid>`) to this file when debug mode is active. Not created or rotated by the daemon; grows only while `--log-level DEBUG` is enabled.
 
 #### 5.3.4 IPv4 Route Management
 
@@ -671,11 +681,12 @@ On startup, the daemon:
 1. Reads the config file.
 2. Initializes all uplink states to `UP` (optimistic start — routes are assumed present).
 3. Writes the PID file (`/run/uplinkmgr/uplinkmgr.pid`).
-4. If dhcpcd is already running (checked via `/run/dhcpcd/pid`), runs `dhcpcd -g` (reconfigure) and waits for it to complete, asking dhcpcd to replay `dhcpcd-run-hooks` for every interface's current state. Logs a warning and continues on failure or timeout — this is a best-effort catch-up, not a hard startup dependency. Skipped entirely if dhcpcd isn't running yet (see §17): there's nothing to catch up on, and invoking `dhcpcd -g` with no live master to reconfigure risks starting a stray dhcpcd process instead.
-5. Installs the global IPv4 policy rules (`lookup main suppress_prefixlength 0` and `lookup uplinkmgr`) and the global IPv6 policy rule (`ip -6 rule add lookup main suppress_prefixlength 0`).
-6. Installs the per-macvlan `ipv6_fwd_to_uplink` rule for every `(uplink, network)` pair, unconditionally, with no `from` constraint yet (PD state isn't known at this point in the general case). These rules are static for the rest of the daemon's lifetime — see §7.5.
-7. Performs an initial reconcile pass over all state files: installs IPv4 and IPv6 routes and the remaining ip -6 rules (`lo_to_uplink`, optionally `reject_wrong_pd_src`) that correspond to existing state files, and narrows step 6's `fwd_to_uplink` rules' `from` constraint where PD state is already present.
-8. Begins the monitoring loop immediately (no delay).
+4. Writes or removes `debug.env` depending on whether `--log-level DEBUG` is in effect (§5.3.3), so the dhcpcd hook's own debug logging tracks the daemon's.
+5. If dhcpcd is already running (checked via `/run/dhcpcd/pid`), runs `dhcpcd -g` (reconfigure) and waits for it to complete, asking dhcpcd to replay `dhcpcd-run-hooks` for every interface's current state. Logs a warning and continues on failure or timeout — this is a best-effort catch-up, not a hard startup dependency. Skipped entirely if dhcpcd isn't running yet (see §17): there's nothing to catch up on, and invoking `dhcpcd -g` with no live master to reconfigure risks starting a stray dhcpcd process instead.
+6. Installs the global IPv4 policy rules (`lookup main suppress_prefixlength 0` and `lookup uplinkmgr`) and the global IPv6 policy rule (`ip -6 rule add lookup main suppress_prefixlength 0`).
+7. Installs the per-macvlan `ipv6_fwd_to_uplink` rule for every `(uplink, network)` pair, unconditionally, with no `from` constraint yet (PD state isn't known at this point in the general case). These rules are static for the rest of the daemon's lifetime — see §7.5.
+8. Performs an initial reconcile pass over all state files: installs IPv4 and IPv6 routes and the remaining ip -6 rules (`lo_to_uplink`, optionally `reject_wrong_pd_src`) that correspond to existing state files, and narrows step 7's `fwd_to_uplink` rules' `from` constraint where PD state is already present.
+9. Begins the monitoring loop immediately (no delay).
 
 The rationale for optimistic start: at boot, dhcpcd has been running and has configured routes before the daemon starts (see §12). The daemon should not deprovision anything until it has actually observed failures.
 

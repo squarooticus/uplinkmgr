@@ -1,11 +1,41 @@
 """Tests for state.py — state file parsing and lifetime calculations."""
 
+from unittest.mock import patch
+
 import pytest
 from tests.conftest import write_state
 from uplinkmgr.state import (
     read_ipv4_state, read_ipv6ra_state, read_ipv6na_state, read_ipv6pd_state,
+    write_atomic,
     IPv4State, IPv6RaState, IPv6NaState, IPv6PdState,
 )
+
+
+# --- write_atomic ---
+
+class TestWriteAtomic:
+    def test_writes_content(self, tmp_path):
+        target = tmp_path / "out.txt"
+        write_atomic(str(target), "hello\n")
+        assert target.read_text() == "hello\n"
+
+    def test_no_leftover_tmp_file(self, tmp_path):
+        target = tmp_path / "out.txt"
+        write_atomic(str(target), "hello\n")
+        assert not (tmp_path / "out.txt.tmp").exists()
+
+    def test_overwrites_existing_file(self, tmp_path):
+        target = tmp_path / "out.txt"
+        target.write_text("old\n")
+        write_atomic(str(target), "new\n")
+        assert target.read_text() == "new\n"
+
+    def test_oserror_logged_not_raised(self, tmp_path):
+        target = tmp_path / "missing_dir" / "out.txt"  # parent doesn't exist
+        with patch("uplinkmgr.state.log") as log:
+            write_atomic(str(target), "hello\n")  # must not raise
+        assert log.error.called
+        assert not target.exists()
 
 
 # --- IPv4State ---

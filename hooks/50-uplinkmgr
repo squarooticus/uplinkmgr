@@ -7,6 +7,10 @@ UPLINKMGR_ENV_DIR="${UPLINKMGR_ENV_DIR:-/etc/uplinkmgr/uplinks}"
 UPLINKMGR_STATE_DIR="${UPLINKMGR_STATE_DIR:-/run/uplinkmgr}"
 UPLINKMGR_PID_FILE="${UPLINKMGR_STATE_DIR}/uplinkmgr.pid"
 
+# Written by the daemon at startup iff it's running at --log-level DEBUG;
+# sets UPLINKMGR_HOOK_LOG so this hook run logs its own actions too.
+[ -f "${UPLINKMGR_STATE_DIR}/debug.env" ] && . "${UPLINKMGR_STATE_DIR}/debug.env"
+
 _debug_log() {
     if [ -n "$UPLINKMGR_HOOK_LOG" ]; then
         echo "$@" >>"$UPLINKMGR_HOOK_LOG"
@@ -34,7 +38,9 @@ _debug_log "$interface is WAN iface"
 
 _signal_daemon() {
     if [ -f "$UPLINKMGR_PID_FILE" ]; then
-        kill -USR1 "$(cat "$UPLINKMGR_PID_FILE")" 2>/dev/null || true
+        _pid="$(cat "$UPLINKMGR_PID_FILE")"
+        _debug_log "+ kill -USR1 ${_pid}"
+        kill -USR1 "$_pid" 2>/dev/null || true
     fi
 }
 

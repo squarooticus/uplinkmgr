@@ -69,7 +69,7 @@ def _run_regenerate_all(cfg, states, tmp_path, pd_states=None, ra_states=None):
                    side_effect=lambda sd, name: ra_states.get(name)):
             with patch("uplinkmgr.radvd.generator.radvd_conf_from_state",
                        side_effect=capture_conf):
-                with patch("uplinkmgr.radvd._write_atomic"):
+                with patch("uplinkmgr.radvd.write_atomic"):
                     with patch("uplinkmgr.radvd._systemctl"):
                         with patch("uplinkmgr.radvd._sighup"):
                             radvd.regenerate_all(

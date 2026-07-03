@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from unittest.mock import patch
 import pytest
 
 from tests.conftest import make_config, make_network, make_uplink, write_state
-from uplinkmgr.daemon import Daemon
+from uplinkmgr import naming
+from uplinkmgr.daemon import Daemon, log as daemon_log
 from uplinkmgr.statemachine import LinkState
 
 
@@ -77,6 +79,56 @@ class TestReconfigureDhcpcd:
                     d._reconfigure_dhcpcd()  # must not raise
 
         assert log.warning.called
+
+
+# ---------------------------------------------------------------------------
+# _write_hook_debug_flag
+# ---------------------------------------------------------------------------
+
+class TestWriteHookDebugFlag:
+    def _debug_env_path(self, tmp_path) -> str:
+        return naming.hook_debug_env_path(str(tmp_path))
+
+    def test_writes_debug_env_when_debug_enabled(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+
+        level = daemon_log.level
+        daemon_log.setLevel(logging.DEBUG)
+        try:
+            d._write_hook_debug_flag()
+        finally:
+            daemon_log.setLevel(level)
+
+        content = (tmp_path / "debug.env").read_text()
+        assert content == f"UPLINKMGR_HOOK_LOG={naming.hook_log_path(str(tmp_path))}\n"
+
+    def test_removes_stale_debug_env_when_debug_disabled(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+        (tmp_path / "debug.env").write_text("UPLINKMGR_HOOK_LOG=/run/uplinkmgr/hook.log\n")
+
+        level = daemon_log.level
+        daemon_log.setLevel(logging.INFO)
+        try:
+            d._write_hook_debug_flag()
+        finally:
+            daemon_log.setLevel(level)
+
+        assert not (tmp_path / "debug.env").exists()
+
+    def test_no_error_when_debug_disabled_and_no_file_present(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+
+        level = daemon_log.level
+        daemon_log.setLevel(logging.INFO)
+        try:
+            d._write_hook_debug_flag()  # must not raise
+        finally:
+            daemon_log.setLevel(level)
+
+        assert not (tmp_path / "debug.env").exists()
 
 
 class TestDhcpcdIsRunning:

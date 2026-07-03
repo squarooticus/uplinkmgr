@@ -1,11 +1,15 @@
-"""Runtime state file reading."""
+"""Runtime state file reading and writing."""
 
 from __future__ import annotations
 
+import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -86,6 +90,16 @@ def read_ipv6pd_state(state_dir: str, uplink_name: str) -> Optional[IPv6PdState]
         "pltime": int,
         "timestamp": int,
     })
+
+
+def write_atomic(path: str, content: str) -> None:
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    except OSError as e:
+        log.error("failed to write %s: %s", path, e)
 
 
 def _read_kv_state(path: Path, cls, field_types: dict,

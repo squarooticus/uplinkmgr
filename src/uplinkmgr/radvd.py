@@ -9,9 +9,10 @@ import time
 from typing import Optional
 
 from .config import Config, UplinkConfig
-from .state import IPv6RaState, IPv6PdState, read_ipv6ra_state, read_ipv6pd_state
+from .state import (IPv6RaState, IPv6PdState, read_ipv6ra_state,
+                    read_ipv6pd_state, write_atomic)
 from .statemachine import LinkState, UplinkState
-from . import naming, generator
+from . import naming, generator, procrun
 
 log = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ def regenerate_all(
         )
 
         conf_path = naming.radvd_conf_path(uplink.name)
-        _write_atomic(conf_path, conf_text)
+        write_atomic(conf_path, conf_text)
 
         unit = naming.radvd_unit_name(uplink.name)
         if action == "restart":
@@ -137,33 +138,19 @@ def _derive_prefixes(
         return {}
 
 
-def _write_atomic(path: str, content: str) -> None:
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w") as f:
-            f.write(content)
-        import os
-        os.replace(tmp, path)
-    except OSError as e:
-        log.error("failed to write %s: %s", path, e)
-
-
 def _sighup(unit: str) -> None:
-    result = subprocess.run(
-        ["systemctl", "kill", "--signal=SIGHUP", unit],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
+    cmd = ["systemctl", "kill", "--signal=SIGHUP", unit]
+    procrun.log_command(log, cmd)
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if result.returncode != 0:
-        log.warning("SIGHUP %s failed: %s", unit, result.stderr.decode().strip())
+        log.warning("command failed: %s: %s",
+                    procrun.format_command(cmd), result.stderr.decode().strip())
 
 
 def _systemctl(action: str, unit: str) -> None:
-    result = subprocess.run(
-        ["systemctl", action, unit],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
+    cmd = ["systemctl", action, unit]
+    procrun.log_command(log, cmd)
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if result.returncode != 0:
-        log.warning("systemctl %s %s failed: %s",
-                    action, unit, result.stderr.decode().strip())
+        log.warning("command failed: %s: %s",
+                    procrun.format_command(cmd), result.stderr.decode().strip())

@@ -104,6 +104,14 @@ def env_symlink_path(iface: str) -> str:
     return f"/etc/uplinkmgr/uplinks/{iface}.env"
 
 
+def hook_debug_env_path(state_dir: str) -> str:
+    return f"{state_dir}/debug.env"
+
+
+def hook_log_path(state_dir: str) -> str:
+    return f"{state_dir}/hook.log"
+
+
 def macvlan_pairs(cfg: Config) -> list[tuple[UplinkConfig, NetworkConfig, str]]:
     """Return all (uplink, network, macvlan_name) triples for IPv6-PD uplinks."""
     result = []

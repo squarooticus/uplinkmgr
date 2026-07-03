@@ -6,6 +6,8 @@ import logging
 import subprocess
 from typing import Optional
 
+from . import procrun
+
 log = logging.getLogger(__name__)
 
 
@@ -114,15 +116,17 @@ def del_ipv6_rule(priority: int) -> None:
 # ---------------------------------------------------------------------------
 
 def _run(cmd: list[str]) -> None:
+    procrun.log_command(log, cmd)
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if result.returncode != 0:
         err = result.stderr.decode().strip()
-        log.error("command failed: %s: %s", " ".join(cmd), err)
+        log.error("command failed: %s: %s", procrun.format_command(cmd), err)
 
 
 def _run_del(cmd: list[str]) -> None:
+    procrun.log_command(log, cmd)
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if result.returncode != 0:
         err = result.stderr.decode().strip()
         log.warning("delete command failed (may already be absent): %s: %s",
-                    " ".join(cmd), err)
+                    procrun.format_command(cmd), err)

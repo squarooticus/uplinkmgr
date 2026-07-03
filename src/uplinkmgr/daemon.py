@@ -14,8 +14,8 @@ from typing import Optional
 
 from .config import Config, UplinkConfig, load as load_config
 from .state import (IPv6PdState, read_ipv4_state, read_ipv6ra_state,
-                    read_ipv6pd_state, read_ipv6na_state)
-from . import monitor, naming, priority, radvd, routing, state
+                    read_ipv6pd_state, read_ipv6na_state, write_atomic)
+from . import monitor, naming, priority, procrun, radvd, routing, state
 from .statemachine import LinkState, UplinkState, update as sm_update
 
 log = logging.getLogger(__name__)
@@ -62,6 +62,7 @@ class Daemon:
         self._init_states()
         self._executor = ThreadPoolExecutor(max_workers=len(self._cfg.uplinks))
         self._write_pid()
+        self._write_hook_debug_flag()
         log.info("uplinkmgr started (pid %d)", os.getpid())
         self._reconfigure_dhcpcd()
         self._setup_ipv4_rules()
@@ -85,9 +86,11 @@ class Daemon:
         if not self._dhcpcd_is_running():
             log.debug("dhcpcd not running yet; skipping reconfigure")
             return
+        cmd = ["dhcpcd", "-g"]
+        procrun.log_command(log, cmd)
         try:
             result = subprocess.run(
-                ["dhcpcd", "-g"],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 timeout=10,
@@ -591,6 +594,18 @@ class Daemon:
         pid_path = Path(self._state_dir) / PID_FILE_NAME
         pid_path.parent.mkdir(parents=True, exist_ok=True)
         pid_path.write_text(str(os.getpid()) + "\n")
+
+    def _write_hook_debug_flag(self) -> None:
+        """Tell the dhcpcd hook (a separate process per lease event) whether
+        to log its own actions, mirroring the daemon's own --log-level."""
+        path = Path(naming.hook_debug_env_path(self._state_dir))
+        if log.isEnabledFor(logging.DEBUG):
+            write_atomic(
+                str(path),
+                f"UPLINKMGR_HOOK_LOG={naming.hook_log_path(self._state_dir)}\n",
+            )
+        else:
+            path.unlink(missing_ok=True)
 
     def _cleanup(self) -> None:
         self._teardown_all()

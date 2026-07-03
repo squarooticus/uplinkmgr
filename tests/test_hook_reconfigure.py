@@ -146,3 +146,33 @@ class TestReconfigure:
 
         assert result.returncode == 0, result.stderr
         assert not (state_dir / "isp1.ipv6na.state").exists()
+
+
+class TestDebugEnv:
+    """debug.env is how the daemon (running at --log-level DEBUG) tells this
+    separately-invoked hook process to log its own actions -- there's no
+    other channel between the two, since the hook runs as a fresh process
+    per dhcpcd lease event."""
+
+    def test_debug_env_absent_writes_no_hook_log(self, env_dir, state_dir):
+        result = _run_hook(
+            env_dir, state_dir, "eth0", "BOUND",
+            new_routers="192.0.2.1", new_ip_address="192.0.2.100",
+        )
+        assert result.returncode == 0, result.stderr
+        assert not (state_dir / "hook.log").exists()
+
+    def test_debug_env_present_activates_hook_log(self, env_dir, state_dir):
+        hook_log = state_dir / "hook.log"
+        (state_dir / "debug.env").write_text(f"UPLINKMGR_HOOK_LOG={hook_log}\n")
+        (state_dir / "uplinkmgr.pid").write_text("999999\n")
+
+        result = _run_hook(
+            env_dir, state_dir, "eth0", "BOUND",
+            new_routers="192.0.2.1", new_ip_address="192.0.2.100",
+        )
+
+        assert result.returncode == 0, result.stderr
+        content = hook_log.read_text()
+        assert "reason=BOUND interface=eth0" in content
+        assert "+ kill -USR1 999999" in content
