@@ -543,9 +543,24 @@ The hook is responsible only for writing state files and signalling the daemon. 
 
 ```
 uplinkmgr [--config /etc/uplinkmgr/uplinkmgr.yaml] [--state-dir /run/uplinkmgr]
+          [--log-level {DEBUG,INFO,WARNING,ERROR}] [--log-clean]
 ```
 
 The daemon runs in the foreground; systemd handles daemonization.
+
+CLI flags:
+- `--config PATH` — config file path (default `/etc/uplinkmgr/uplinkmgr.yaml`).
+- `--state-dir DIR` — runtime state directory (default `/run/uplinkmgr`).
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` — logging level (default `INFO`).
+- `--log-clean` — use a minimal log format: `LEVEL message`, e.g.
+  `INFO uplink isp1 transitioned UP -> DOWN`, instead of the default
+  `%(asctime)s uplinkmgr %(levelname)s %(message)s`. Intended for running
+  under systemd, where journald already timestamps every line and tags it
+  with the unit/process identity via its own metadata — the default format's
+  timestamp and `uplinkmgr` literal are redundant there and clutter
+  `journalctl -u uplinkmgr` output. Defaults off so manual/terminal
+  invocations still get a self-contained, readable log line. The packaged
+  `uplinkmgr.service` unit (§14.4) passes this flag.
 
 #### 5.3.3 State Directory
 
@@ -1586,7 +1601,7 @@ After=network.target dhcpcd.service
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/uplinkmgr
+ExecStart=/usr/sbin/uplinkmgr --log-clean
 ExecStop=/bin/kill -TERM $MAINPID
 Restart=on-failure
 RestartSec=10s
@@ -1598,6 +1613,8 @@ WantedBy=multi-user.target
 ```
 
 `RuntimeDirectory=uplinkmgr` causes systemd to create `/run/uplinkmgr/` with the correct permissions before starting the daemon, and clean it up on stop.
+
+`--log-clean` (§5.3.2) is passed because this unit's output is always captured by journald, which already timestamps and identifies each line.
 
 ### 14.5 `postinst` Script
 
@@ -1814,6 +1831,7 @@ The following items require verification against upstream documentation or testi
 | 26 | routing | ~~Whether the per-macvlan `ipv6_fwd_to_uplink` rule needs to be removed when PD state is lost or an uplink goes DOWN, or can stay installed for the daemon's lifetime~~ **Resolved (per user direction):** the rule can be static. It merely says "packets arriving on this macvlan consult this table" — the per-uplink table's actual route content (gated on live `ipv6ra.state`, independent of daemon-observed health) and radvd's RA updates (`AdvDefaultLifetime 0` etc. on DOWN) are what control whether traffic can or should flow, not the rule's mere presence. When PD is lost, a stale `from <old-delegated-prefix>` constraint (under `reject_wrong_pd_src`) is left in place rather than reverted — inert for the same reason, since radvd will already have told clients to abandon that prefix. Installed once, unconditionally, at startup (`Daemon._setup_ipv6_macvlan_rules()`); only ever updated in place (never deleted) until `_teardown_all()`. Scoped to `ipv6_fwd_to_uplink` only — the `ipv6_reject_wrong_pd_src` prohibit rule (a security control, not a routing-availability one) remains driven by PD-state presence as before. See §7.5, §11.3. | — |
 | 27 | dhcpcd | ~~Whether `dhcpcd -g`/`--reconfigure` is safe to invoke when no dhcpcd master process is running yet~~ **Resolved: not safe, now gated.** Two e2e tests (`tests/e2e/test_ipv6.py::TestIPv6PD::test_ipv6_fwd_to_uplink_rule_installed`, `::test_ipv6_down_preference_low_in_radvd_conf`) start the uplinkmgr daemon before dhcpcd and failed with `isp1.ipv4.state` never being written. `dhcpcd(8)`'s other client-mode flags (`-n`/`--rebind`, `-N`/`--renew`) document "if dhcpcd is not running, then it starts up as normal" — `-g` isn't documented either way, but the failure pattern is consistent with the same fallback applying: a stray dhcpcd master started via the system default `/etc/dhcpcd.conf` (not the caller's intended config) blocking the real, correctly-configured dhcpcd from ever obtaining a lease. Not independently confirmed against a live dhcpcd (not testable from within this environment), so `Daemon._reconfigure_dhcpcd()` (§5.3.8 step 4) now checks `/run/dhcpcd/pid` for a live PID via `Daemon._dhcpcd_is_running()` before invoking `dhcpcd -g` at all, and skips (logging at debug level) if no live master is found — eliminating the risk category regardless of the exact mechanism. A 10s `subprocess` timeout was also added as defense-in-depth against any other stalling mode. | — |
 | 28 | daemon | ~~Whether IPv6 probing should be gated on the per-uplink routing table already containing a default route~~ **Resolved: no, removed.** `tests/e2e/test_ipv6.py::TestIPv6PD::test_ipv6_down_preference_low_in_radvd_conf` failed: after `ip link set wan1 down`, the daemon never transitioned `isp1`'s IPv6 health to DOWN. Root cause: Linux purges IPv6 routes tied to a device from every routing table on `NETDEV_DOWN` (`rt6_ifdown()`), independent of uplinkmgr; the old precondition (§5.3.7/§10.3) then saw no route in the per-uplink table and silently skipped IPv6 probing every cycle thereafter, and nothing re-evaluated the precondition without a probe having already run — permanently freezing health at `UP`. The precondition was never actually necessary: `_reconcile_uplink_ipv6()` reinstalls the per-uplink route purely from `ipv6ra.state` (§11.3), independent of probe-observed health, and a probe simply fails on its own (via the kernel's `ip -6 rule` fallback to the main table, or outright) when nothing is reachable — that failure is itself the correct DOWN signal. `Daemon._probe_uplink()` now probes IPv6 unconditionally whenever `ipv6_pd`/`ia_na` is configured, with no route-existence check (`monitor.ipv6_default_route_exists()` removed entirely). Recovery is unaffected: once probes succeed again, the existing `ipv6_changed` → `_reconcile_uplink_ipv6()` path (unchanged) reinstalls the per-uplink route as a side effect. See §5.3.7, §10.3, §11.3. | — |
+| 29 | daemon CLI | ~~Whether the journald-clean log format should be a config-file option or a CLI flag, and whether it should default on or off~~ **Resolved (per user direction):** CLI flag, consistent with the existing `--log-level`/`--config`/`--state-dir` flags (all CLI-only; the YAML config governs uplink/routing/monitoring semantics, not process-level logging). Defaults off, since a manual/terminal invocation still wants a self-contained line with its own timestamp; the packaged `uplinkmgr.service` unit (§14.4) passes `--log-clean` explicitly, since that unit's output is always captured by journald. See §5.3.2. | — |
 
 ---
 

@@ -4,7 +4,7 @@ After=network.target dhcpcd.service
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/uplinkmgr
+ExecStart=/usr/sbin/uplinkmgr --log-clean
 ExecStop=/bin/kill -TERM $MAINPID
 Restart=on-failure
 RestartSec=10s

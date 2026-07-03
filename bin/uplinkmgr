@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """uplinkmgr — multi-WAN uplink monitor daemon."""
 
+from __future__ import annotations
+
 import argparse
 import logging
 import sys
@@ -9,7 +11,7 @@ from uplinkmgr import config as cfg_mod
 from uplinkmgr.daemon import Daemon, DEFAULT_STATE_DIR
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="uplinkmgr multi-WAN uplink monitor daemon")
     p.add_argument(
         "--config",
@@ -29,14 +31,28 @@ def parse_args() -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="logging level (default: INFO)",
     )
-    return p.parse_args()
+    p.add_argument(
+        "--log-clean",
+        action="store_true",
+        help="omit timestamp and process name from log output "
+             "(for use under systemd, where journald already provides them)",
+    )
+    return p.parse_args(argv)
+
+
+def log_format(clean: bool) -> str:
+    """Log format string. Clean mode drops the timestamp and process name,
+    since journald already attaches both when systemd captures stdout/stderr."""
+    if clean:
+        return "%(levelname)s %(message)s"
+    return "%(asctime)s uplinkmgr %(levelname)s %(message)s"
 
 
 def main() -> None:
     args = parse_args()
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format="%(asctime)s uplinkmgr %(levelname)s %(message)s",
+        format=log_format(args.log_clean),
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
     daemon = Daemon(config_path=args.config, state_dir=args.state_dir)
