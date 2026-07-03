@@ -2,16 +2,12 @@
 set -e
 
 case "$1" in
-    remove|upgrade|deconfigure)
+    remove|deconfigure)
         if [ -d /run/systemd/system ]; then
-            # Stop radvd units before the generated .service files are removed.
-            for svc in /etc/systemd/system/radvd-uplinkmgr-*.service; do
-                [ -f "$svc" ] || continue
-                name=$(basename "$svc")
-                systemctl disable --now "$name" 2>/dev/null || true
+            # Disable and stop radvd units
+            for unit in $(systemctl list-units --all 'radvd-uplinkmgr@*' --no-legend | awk '{print $1;}'); do
+                systemctl disable --now "$unit" || true
             done
-            # Stop dhcpcd; postrm will restore /etc/dhcpcd.conf from backup.
-            systemctl stop dhcpcd.service 2>/dev/null || true
         fi
         ;;
 esac

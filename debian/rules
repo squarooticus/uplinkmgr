@@ -15,10 +15,10 @@ override_dh_auto_install:
 	install -d debian/uplinkmgr/usr/libexec/dhcpcd-hooks
 	install -m 755 hooks/50-uplinkmgr \
 	    debian/uplinkmgr/usr/libexec/dhcpcd-hooks/
-	# Example config
-	install -d debian/uplinkmgr/etc/uplinkmgr
-	install -m 644 etc/uplinkmgr/uplinkmgr.yaml.example \
-	    debian/uplinkmgr/etc/uplinkmgr/
+	# radvd systemd template unit file
+	install -d debian/uplinkmgr/usr/lib/systemd/system
+	install -m 644 systemd/radvd-uplinkmgr@.service \
+	    debian/uplinkmgr/usr/lib/systemd/system/
 
 # dh_installsystemd handles the uplinkmgr.service unit automatically
 # (picks it up from debian/uplinkmgr.service).

@@ -1,7 +1,7 @@
 Source: uplinkmgr
 Section: net
 Priority: optional
-Maintainer: Kevin Rose <krose@krose.org>
+Maintainer: Kyle Rose <krose@krose.org>
 Build-Depends:
  debhelper-compat (= 13),
  dh-python,

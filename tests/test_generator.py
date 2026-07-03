@@ -10,7 +10,6 @@ from uplinkmgr.generator import (
     env_file,
     interfaces_file,
     radvd_conf_from_state,
-    radvd_template_unit,
     rt_tables,
 )
 
@@ -137,36 +136,6 @@ def test_dhcpcd_macvlan_iaid_unique_across_uplinks_sharing_network():
     iaids = re.findall(r"^    iaid (\d+)$", out, re.MULTILINE)
     assert len(iaids) == 2
     assert len(set(iaids)) == 2
-
-
-# --- radvd_template_unit ---
-
-def test_radvd_template_unit_uses_percent_i():
-    out = radvd_template_unit()
-    assert "%i" in out
-
-
-def test_radvd_template_unit_no_literal_uplink_name():
-    out = radvd_template_unit()
-    for name in ("comcast", "isp", "provider"):
-        assert name not in out
-
-
-def test_radvd_template_unit_single_execstart_with_execstartpre():
-    out = radvd_template_unit()
-    assert out.count("ExecStartPre=") == 1
-    assert out.count("\nExecStart=") == 1
-    assert "--nodaemon" not in out
-
-
-def test_radvd_template_unit_conf_path():
-    out = radvd_template_unit()
-    assert "/etc/uplinkmgr/radvd/radvd-uplinkmgr-%i.conf" in out
-
-
-def test_radvd_template_unit_pid_path():
-    out = radvd_template_unit()
-    assert "/run/radvd-uplinkmgr-%i.pid" in out
 
 
 # --- radvd_conf_from_state ---

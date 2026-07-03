@@ -3,21 +3,14 @@ set -e
 
 case "$1" in
     configure)
-        PREV_VERSION="$2"
-        FRESH_INSTALL=false
-        [ -z "$PREV_VERSION" ] && FRESH_INSTALL=true
-
-        # Install default config on first install
-        if $FRESH_INSTALL && [ ! -f /etc/uplinkmgr/uplinkmgr.yaml ]; then
-            install -d /etc/uplinkmgr
-            cp /etc/uplinkmgr/uplinkmgr.yaml.example \
-               /etc/uplinkmgr/uplinkmgr.yaml
-            echo "uplinkmgr: installed example config to /etc/uplinkmgr/uplinkmgr.yaml"
-            echo "uplinkmgr: edit it and run 'uplinkmgr-setup' before starting services"
-        fi
-
-        # Generate/regenerate config files (writes /etc/dhcpcd.conf with backup)
-        if [ -f /etc/uplinkmgr/uplinkmgr.yaml ]; then
+        if [ ! -f /etc/uplinkmgr/uplinkmgr.yaml ]; then
+            # Brief instructions on how to configure and enable uplinkmgr
+            echo "uplinkmgr: Example config at /usr/share/doc/uplinkmgr.yaml.example"
+            echo "uplinkmgr: Copy to /etc/uplinkmgr/uplinkmgr.yaml and modify where necessary"
+            echo "uplinkmgr: Possibly add /etc/uplinkmgr/dhcpcd.conf.{head,tail} to tweak dhcpcd config"
+            echo "uplinkmgr: Finally, run 'uplinkmgr-setup' to enable"
+        else
+            # (Re)generate config files if already configured
             uplinkmgr-setup || true
         fi
         ;;
@@ -28,21 +21,8 @@ esac
 case "$1" in
     configure)
         if [ -d /run/systemd/system ]; then
+            # Make sure the newly-installed/updated unit files are re-read
             systemctl daemon-reload || true
-            # Restart dhcpcd so it picks up the new /etc/dhcpcd.conf.
-            systemctl restart dhcpcd.service || true
-            # Restart radvd units if already running (fresh-install start is
-            # handled by dh_installsystemd via the WantedBy= in each unit).
-            for svc in /etc/systemd/system/radvd-uplinkmgr-*.service; do
-                [ -f "$svc" ] || continue
-                name=$(basename "$svc")
-                if [ -z "$2" ]; then
-                    systemctl enable "$name" || true
-                    systemctl start "$name" || true
-                elif systemctl is-active --quiet "$name" 2>/dev/null; then
-                    systemctl restart "$name" || true
-                fi
-            done
         fi
         ;;
 esac

@@ -1,9 +1,9 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: uplinkmgr
-Upstream-Contact: Kevin Rose <krose@krose.org>
+Upstream-Contact: Kyle Rose <krose@krose.org>
 
 Files: *
-Copyright: 2026 Kevin Rose <krose@krose.org>
+Copyright: 2026 Kyle Rose <krose@krose.org>
 License: MIT
 
 License: MIT

@@ -32,9 +32,9 @@ def regenerate_all(
 ) -> None:
     """Regenerate radvd configs for all IPv6 uplinks and optionally signal radvd.
 
-    action="restart" → write configs with fresh lifetime values, systemctl restart
-    action="sighup"  → write configs, send SIGHUP (preference-change only)
-    action="write"   → write configs only, no signal (rate-limited SIGUSR1 path)
+    action="restart" -> write configs with fresh lifetime values, systemctl restart
+    action="sighup"  -> write configs, send SIGHUP (preference-change only)
+    action="write"   -> write configs only, no signal (rate-limited SIGUSR1 path)
     """
     now = int(time.time())
 
