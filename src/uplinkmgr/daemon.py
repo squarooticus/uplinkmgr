@@ -274,7 +274,12 @@ class Daemon:
         ipv6_probe_enabled = uplink.ipv6_pd or uplink.ia_na
         ipv6_ok = True
         if ipv6_probe_enabled:
-            ipv6_ok = monitor.probe_ipv6(uplink.interface, cfg.monitor.v6_hosts, count)
+            # Only the IA_NA address is a single, stable address we can bind
+            # to; SLAAC (RA prefix, possibly with privacy addresses) has no
+            # one fixed address to hand to ping, so fall back to -I <iface> alone.
+            na_st = state.read_ipv6na_state(self._state_dir, uplink.name)
+            ipv6_addr = na_st.address if na_st is not None else None
+            ipv6_ok = monitor.probe_ipv6(uplink.interface, cfg.monitor.v6_hosts, count, ipv6_addr)
 
         return uplink.name, ipv4_ok, ipv6_ok, ipv6_probe_enabled
 

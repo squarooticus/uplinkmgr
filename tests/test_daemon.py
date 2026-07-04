@@ -560,3 +560,30 @@ class TestProbeUplink:
             d._probe_uplink(cfg.uplinks[0])
 
         m.probe_ipv4.assert_called_once()
+
+    def test_probe_ipv6_passes_known_ia_na_address(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0,
+                                                 ipv6_pd=False, ia_na=True)])
+        d = _make_daemon(cfg, tmp_path)
+        write_state(tmp_path, "isp", "ipv6na", {"address": "2602:107:6511:3d:d69:2d19:b22:5322"})
+
+        with patch("uplinkmgr.daemon.monitor") as m:
+            m.probe_ipv4.return_value = True
+            m.probe_ipv6.return_value = True
+            d._probe_uplink(cfg.uplinks[0])
+
+        assert m.probe_ipv6.call_args[0][3] == "2602:107:6511:3d:d69:2d19:b22:5322"
+
+    def test_probe_ipv6_passes_none_without_ia_na_state(self, tmp_path):
+        """SLAAC-only uplinks (no IA_NA) have no single fixed address to bind
+        to, so the probe falls back to -I <iface> alone."""
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0,
+                                                 ipv6_pd=True, ia_na=False)])
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.monitor") as m:
+            m.probe_ipv4.return_value = True
+            m.probe_ipv6.return_value = True
+            d._probe_uplink(cfg.uplinks[0])
+
+        assert m.probe_ipv6.call_args[0][3] is None

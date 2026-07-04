@@ -75,3 +75,17 @@ def test_probe_ipv6_all_fail():
         result = monitor.probe_ipv6("eth0", ["2001:4860:4860::8888"], count=2)
     assert result is False
     assert m.call_count == 2
+
+
+# --- src_addr: -I is repeated (iface, then address) when a source is known ---
+
+def test_probe_ipv6_with_src_addr_repeats_dash_i():
+    with patch("uplinkmgr.monitor.subprocess.run", return_value=OK) as m:
+        monitor.probe_ipv6("eth0", ["2001:4860:4860::8888"], count=1,
+                            src_addr="2602:107:6511:3d:d69:2d19:b22:5322")
+    cmd = m.call_args[0][0]
+    assert cmd == [
+        "ping6", "-c", "1", "-W", "2", "-n", "-q",
+        "-I", "eth0", "-I", "2602:107:6511:3d:d69:2d19:b22:5322",
+        "2001:4860:4860::8888",
+    ]

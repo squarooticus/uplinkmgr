@@ -1320,10 +1320,11 @@ The daemon runs probes sequentially within a probe cycle. All probes for all upl
 ### 10.3 IPv6 Probe Detail
 
 ```sh
-ping6 -c 1 -W 2 -I <wan-iface> <host>
+ping6 -c 1 -W 2 -I <wan-iface> [-I <ia-na-address>] <host>
 ```
 
 - `-I <wan-iface>`: Binds the socket to the WAN interface. The kernel selects the route via the `ip -6 rule` chain installed by the daemon — normally the per-uplink routing table, falling through to the main table via the global `lookup main suppress_prefixlength 0` rule if the per-uplink table has no matching route. This is the correct behavior — it probes whatever path clients would actually use for this uplink, and degrades gracefully (rather than going blind) if the per-uplink table's route is temporarily missing.
+- `-I <ia-na-address>`: When the uplink's `ipv6na.state` file is present (managed/IA_NA networks only), its `address` is passed as a second `-I`, which ping6(8) honors as a source-address bind in addition to the interface bind. This matters, unlike the IPv4 case: an unbound IPv6 socket's route lookup is two-phase — RFC 6724 source address selection (phase 1) can't apply the daemon's `from <addr> iif lo lookup <table>` rule (no source is chosen yet) and instead depends on the source-unconstrained `32766: from all lookup main` rule finding a route to bootstrap off, which is dhcpcd's own copy of the default route in the main table, refreshed on its own schedule independent of uplinkmgr's per-uplink table copy. If dhcpcd's copy has expired, phase 1 fails before the (otherwise valid) `lo_to_uplink` rule ever gets a chance to run in phase 2. Binding the source address up front skips phase 1's bootstrap dependency entirely. SLAAC-only networks (no IA_NA) have no single fixed address to bind to (possibly several, including privacy addresses) and fall back to the interface-only bind.
 
 All hosts in `monitor.v6_hosts` are probed. Pass/fail logic is the same as IPv4.
 
