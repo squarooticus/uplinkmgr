@@ -1561,7 +1561,7 @@ When the daemon receives SIGTERM (or is stopped by `systemctl stop uplinkmgr`):
 
 ### 13.4 What the Daemon Does NOT Clean Up
 
-- State files in `/run/uplinkmgr/` (written by the hook; removed by the hook on EXPIRE/STOP events; also cleaned up by systemd's `RuntimeDirectory=` on service stop)
+- State files in `/run/uplinkmgr/` (written by the hook; removed by the hook on EXPIRE/STOP events). Deliberately *not* removed by systemd on daemon stop either — see `RuntimeDirectoryPreserve=true` in §14.4.
 - macvlan interfaces (managed by ifupdown)
 - dhcpcd leases or processes (managed by systemd)
 - radvd processes (managed by systemd)
@@ -1619,12 +1619,13 @@ Restart=on-failure
 RestartSec=10s
 RuntimeDirectory=uplinkmgr
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=true
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-`RuntimeDirectory=uplinkmgr` causes systemd to create `/run/uplinkmgr/` with the correct permissions before starting the daemon, and clean it up on stop.
+`RuntimeDirectory=uplinkmgr` causes systemd to create `/run/uplinkmgr/` with the correct permissions before starting the daemon. `RuntimeDirectoryPreserve=true` overrides systemd's default of also removing that directory on every stop: the dhcpcd hook (§5.2) writes and removes the per-uplink state files in `/run/uplinkmgr/` independently of whether `uplinkmgr.service` is running, since dhcpcd itself is a separate, always-on service. Without this setting, every daemon stop or restart (crash, `systemctl restart`, manual maintenance) would discard dhcpcd's already-accurate state, forcing the daemon to fall back on the slower `dhcpcd -g` replay (§5.3.8 step 5) to reconstruct it from scratch. With it, the state files simply survive the daemon's own restarts, so its first reconcile pass after starting already reflects reality — the `dhcpcd -g` replay is then only needed for the narrower case of a hook event whose `SIGUSR1` notification was lost while the daemon was down (§5.3.8).
 
 `--log-clean` (§5.3.2) is passed because this unit's output is always captured by journald, which already timestamps and identifies each line.
 
