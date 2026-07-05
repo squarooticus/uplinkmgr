@@ -1,3 +1,7 @@
+> **Historical document.** This is the original project brief that SPEC.md was
+> developed from, retained for provenance. Where the two disagree, SPEC.md is
+> authoritative.
+
 I need a system for configuring and monitoring multiple internet (WAN) uplinks with a priority order, along with a daemon that monitors and provides IPv4 default route connectivity through the highest priority working uplink, as well as IPv6 connectivity for multiple working uplinks simultaneously. The IPv6 behavior should allow the client to make more intelligent decisions about which uplink to use, via source address and route selection, while preventing cross-talk (using the wrong source address for an uplink) and intelligently deprecating prefixes and routes when an uplink is no longer working.
 
 I would like the daemon to be written in Python. The rest of the system can be in Python if they share code or it is otherwise convenient, or it can be written in bash or POSIX shell.

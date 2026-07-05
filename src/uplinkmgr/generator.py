@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
-from typing import Optional
 
 from .config import Config, UplinkConfig, NetworkConfig
 from . import naming
@@ -269,7 +266,9 @@ def write_file(path: str, content: str, dry_run: bool = False) -> None:
         return
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(content)
+    tmp.replace(p)
 
 
 def write_symlink(link_path: str, target_name: str, dry_run: bool = False) -> None:

@@ -5,7 +5,7 @@ case "$1" in
     configure)
         if [ ! -f /etc/uplinkmgr/uplinkmgr.yaml ]; then
             # Brief instructions on how to configure and enable uplinkmgr
-            echo "uplinkmgr: Example config at /usr/share/doc/uplinkmgr.yaml.example"
+            echo "uplinkmgr: Example config at /usr/share/doc/uplinkmgr/uplinkmgr.yaml.example"
             echo "uplinkmgr: Copy to /etc/uplinkmgr/uplinkmgr.yaml and modify where necessary"
             echo "uplinkmgr: Possibly add /etc/uplinkmgr/dhcpcd.conf.{head,tail} to tweak dhcpcd config"
             echo "uplinkmgr: Finally, run 'uplinkmgr-setup' to enable"

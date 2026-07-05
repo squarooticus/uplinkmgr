@@ -6,7 +6,7 @@ from uplinkmgr.naming import (
     macvlan_name, mac_address, macvlan_iaid, link_local,
     ipv4_table_num, ipv4_table_name,
     ipv6_table_num, ipv6_table_name,
-    radvd_conf_path, radvd_template_unit_name, radvd_unit_name,
+    radvd_conf_path, radvd_unit_name,
     env_file_path, env_symlink_path,
     validate_macvlan_names,
 )
@@ -145,10 +145,6 @@ def test_ipv6_table_name():
 
 def test_radvd_conf_path():
     assert radvd_conf_path("comcast") == "/etc/uplinkmgr/radvd/radvd-uplinkmgr-comcast.conf"
-
-
-def test_radvd_template_unit_name():
-    assert radvd_template_unit_name() == "radvd-uplinkmgr@.service"
 
 
 def test_radvd_unit_name():

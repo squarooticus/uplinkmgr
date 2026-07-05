@@ -41,9 +41,10 @@ delegates to existing tools rather than replacing them:
   dhcpcd events and the daemon.
 
 - **radvd** sends Router Advertisements to internal networks. uplinkmgr-setup
-  generates one radvd config file per IPv6-capable uplink and a parameterised
-  systemd template unit. The daemon controls `AdvDefaultPreference` by
-  rewriting those config files and sending SIGHUP to the radvd instances.
+  generates one radvd config file per IPv6-capable uplink; each runs as an
+  instance of the packaged systemd template unit `radvd-uplinkmgr@.service`.
+  The daemon controls `AdvDefaultPreference` by rewriting those config files
+  and sending SIGHUP to the radvd instances.
 
 uplinkmgr does not support systemd-networkd, NetworkManager, or ISC
 dhclient as replacements for any of the above.
@@ -54,8 +55,8 @@ uplinkmgr has three components:
 
 1. **`uplinkmgr-setup`** — a one-shot config generator. Run after editing
    `/etc/uplinkmgr/uplinkmgr.yaml` to regenerate dhcpcd config, macvlan
-   interface stanzas, radvd config files, routing table names, and systemd
-   units for radvd instances.
+   interface stanzas, radvd config files, and routing table names, then
+   enable and (re)start the affected services.
 
 2. **dhcpcd hook** (`/usr/libexec/dhcpcd-hooks/50-uplinkmgr`) — sourced by
    dhcpcd on every lease event. Writes compact state files to
@@ -105,20 +106,28 @@ This writes:
   (backs up any existing file to `/etc/dhcpcd.conf.pre-uplinkmgr`)
 - `/etc/network/interfaces.d/uplinkmgr.conf` — macvlan interface stanzas
 - `/etc/uplinkmgr/radvd/radvd-uplinkmgr-<name>.conf` — radvd config per IPv6 uplink
-- `/etc/systemd/system/radvd-uplinkmgr@.service` — parameterised radvd unit
 - `/etc/iproute2/rt_tables.d/uplinkmgr.conf` — routing table name entries
 - `/etc/uplinkmgr/uplinks/<name>.env` — per-uplink env files read by the hook
 
+(The radvd systemd unit itself is not generated — the package ships a
+parameterised template at `/usr/lib/systemd/system/radvd-uplinkmgr@.service`,
+one instance of which runs per IPv6 uplink.)
+
 Run `uplinkmgr-setup --dry-run` to preview output without writing files.
 
-### 3. Enable and start services
+### 3. Services
+
+When systemd is running, `uplinkmgr-setup` finishes by enabling and starting
+everything itself — equivalent to:
 
 ```sh
-systemctl daemon-reload
-systemctl restart dhcpcd
+systemctl enable --now dhcpcd                             # plus a restart to pick up the new config
 systemctl enable --now radvd-uplinkmgr@comcast.service   # repeat for each IPv6 uplink
-systemctl enable --now uplinkmgr
+systemctl enable --now uplinkmgr                          # plus a restart if already running
 ```
+
+It also stops and disables radvd instances for uplinks that were removed
+from the config. No manual `systemctl` steps are needed after running it.
 
 Macvlan interfaces are brought up by ifupdown from the generated
 `interfaces.d` stanza, so no additional step is needed for those.
@@ -318,6 +327,25 @@ State transitions use hysteresis:
 With default settings, failover takes 30 seconds (3 × 10s interval) in the
 worst case. Adjust `interval` and `failure_threshold` to trade off detection
 latency against sensitivity to transient packet loss.
+
+### Diagnostics
+
+The daemon takes a few flags (the packaged unit passes `--log-clean`, which
+drops timestamps and process names because journald adds its own):
+
+```
+uplinkmgr [--config PATH] [--state-dir DIR] [--log-level {DEBUG,INFO,WARNING,ERROR}] [--log-clean]
+```
+
+At `--log-level DEBUG`, every external command the daemon runs (`ip`,
+`systemctl`, `ping`, `dhcpcd -g`) is logged in copy-pasteable shell form.
+The daemon also writes `/run/uplinkmgr/debug.env` at startup, which tells
+the dhcpcd hook (a separate process per lease event) to log its own actions
+— an environment dump and every state-file write — to
+`/run/uplinkmgr/hook.log`. To turn all of this on for a systemd-managed
+daemon, add `--log-level DEBUG` to the unit's `ExecStart` (e.g. via
+`systemctl edit uplinkmgr`) and restart the service; changing the log level
+requires a restart.
 
 ---
 

@@ -219,6 +219,23 @@ def test_duplicate_uplink_interface(tmp_path):
             """))
 
 
+def test_duplicate_uplink_metric(tmp_path):
+    with pytest.raises(SystemExit):
+        load(_cfg_file(tmp_path, """
+            uplinkmgr:
+              networks:
+                - name: lan
+                  interface: eth1
+              uplinks:
+                - name: isp1
+                  interface: eth0
+                  metric: 100
+                - name: isp2
+                  interface: eth3
+                  metric: 100
+            """))
+
+
 def test_interface_name_too_long(tmp_path):
     with pytest.raises(SystemExit):
         load(_cfg_file(tmp_path, """

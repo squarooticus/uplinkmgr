@@ -25,7 +25,12 @@ def probe_ipv4(wan_iface: str, hosts: Sequence[str], count: int) -> bool:
 
 def probe_ipv6(wan_iface: str, hosts: Sequence[str], count: int,
                 src_addr: Optional[str] = None) -> bool:
-    """Return True if any ping6 -c 1 to any host succeeds (up to count attempts per host)."""
+    """Return True if any ping6 -c 1 to any host succeeds (up to count attempts per host).
+
+    When src_addr is given, a second -I binds the probe to that source
+    address (in addition to the interface bind), so route lookup doesn't
+    depend on the main table to bootstrap source address selection.
+    """
     for host in hosts:
         for _ in range(count):
             cmd = ["ping6", "-c", "1", "-W", "2", "-n", "-q", "-I", wan_iface]

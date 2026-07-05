@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 try:
     import yaml
@@ -167,6 +166,7 @@ def _parse_uplinks(raw: object, routing_table_start: int) -> list[UplinkConfig]:
     uplinks = []
     seen_names: set[str] = set()
     seen_ifaces: set[str] = set()
+    seen_metrics: set[int] = set()
     for i, entry in enumerate(raw):
         if not isinstance(entry, dict):
             _die(f"uplinks[{i}] must be a mapping")
@@ -194,6 +194,9 @@ def _parse_uplinks(raw: object, routing_table_start: int) -> list[UplinkConfig]:
 
         if metric <= 0:
             _die(f"uplinks[{i}].metric must be positive, got {metric}")
+        if metric in seen_metrics:
+            _die(f"duplicate uplink metric {metric}")
+        seen_metrics.add(metric)
         if not (0 < ipv6_pd_hint <= 64):
             _die(f"uplinks[{i}].ipv6_pd_hint must be 1–64, got {ipv6_pd_hint}")
 
