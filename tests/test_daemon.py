@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from unittest.mock import patch
 import pytest
 
@@ -184,6 +185,64 @@ class TestDoReload:
 
         r.add_ipv6_fwd_to_uplink_rule.assert_called_once()
         assert d._installed["isp"].macvlan_fwd["eth1-u0"] is None
+
+    def test_reload_resets_probe_timer(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+        d._last_probe = time.monotonic()
+
+        with patch("uplinkmgr.daemon.load_config", return_value=cfg):
+            with patch("uplinkmgr.daemon.routing"):
+                d._do_reload()
+
+        assert d._last_probe == float("-inf")
+
+
+# ---------------------------------------------------------------------------
+# _loop probe timing
+# ---------------------------------------------------------------------------
+
+class TestLoop:
+    def _run_one_iteration(self, d):
+        """Run _loop for exactly one iteration: the _sleep stub stops the loop."""
+        def stop(seconds):
+            d._running = False
+        with patch.object(d, "_sleep", side_effect=stop):
+            with patch.object(d, "_run_cycle") as cycle:
+                d._loop()
+        return cycle
+
+    def test_first_iteration_probes_immediately(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+
+        cycle = self._run_one_iteration(d)
+
+        cycle.assert_called_once()
+        assert d._last_probe > float("-inf")
+
+    def test_signal_wake_within_interval_does_not_probe(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+        d._last_probe = time.monotonic()
+        d._reconcile_requested = True
+
+        with patch.object(d, "_do_reconcile") as reconcile:
+            cycle = self._run_one_iteration(d)
+
+        reconcile.assert_called_once()
+        cycle.assert_not_called()
+
+    def test_probe_runs_when_interval_elapsed(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+        d._last_probe = time.monotonic() - cfg.monitor.interval - 1
+
+        before = time.monotonic()
+        cycle = self._run_one_iteration(d)
+
+        cycle.assert_called_once()
+        assert d._last_probe >= before
 
 
 # ---------------------------------------------------------------------------

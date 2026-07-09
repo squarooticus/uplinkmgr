@@ -49,6 +49,7 @@ class Daemon:
         self._reconcile_requested = False
         self._radvd_sighup_requested = False
         self._last_radvd_sighup: float = 0.0
+        self._last_probe: float = float("-inf")  # monotonic; -inf => probe immediately
         self._running = True
         self._executor: Optional[ThreadPoolExecutor] = None
 
@@ -129,16 +130,21 @@ class Daemon:
             if self._reconcile_requested:
                 self._do_reconcile()
 
-            start = time.monotonic()
-            self._run_cycle()
-            elapsed = time.monotonic() - start
-
+            # Probe timing is independent of signal wake-ups: a signal storm
+            # (e.g. an ISP sending RAs every second, each one a hook SIGUSR1)
+            # must not drive probing faster than monitor.interval.
             interval = self._cfg.monitor.interval
-            if elapsed > interval:
-                log.warning("monitoring cycle took %.1fs, exceeds interval %ds",
-                            elapsed, interval)
-            else:
-                self._sleep(interval - elapsed)
+            now = time.monotonic()
+            if now - self._last_probe >= interval:
+                self._last_probe = now
+                self._run_cycle()
+                elapsed = time.monotonic() - now
+                if elapsed > interval:
+                    log.warning("monitoring cycle took %.1fs, exceeds interval %ds",
+                                elapsed, interval)
+
+            # Sleep until a signal or the next cycle start
+            self._sleep(self._last_probe + interval - time.monotonic())
 
     def _sleep(self, seconds: float) -> None:
         """Sleep, but wake early on SIGUSR1, SIGUSR2, or SIGHUP."""
@@ -194,6 +200,8 @@ class Daemon:
         self._setup_ipv6_rules()
         self._setup_ipv6_macvlan_rules()
         self._reconcile_all()
+        # States were just reset to optimistic UP; re-validate promptly.
+        self._last_probe = float("-inf")
         log.info("config reloaded; all uplink states reset to UP")
 
     # ------------------------------------------------------------------

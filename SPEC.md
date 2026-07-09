@@ -644,16 +644,23 @@ Uplinks with `lifetime = 0` in `ipv6ra.state` (infinite router lifetime) are exc
 #### 5.3.6 Main Loop
 
 ```
-while True:
-    for each uplink:
-        probe IPv4 (if state file exists or uplink was previously UP)
-        probe IPv6 (if ipv6_pd=true)
-        update state machine
-        if state changed: apply provisioning/deprovisioning actions
-    sleep(monitor.interval)
+last_probe = -inf
+while running:
+    handle pending signal work (config reload / radvd sighup / reconcile)
+    if now - last_probe >= monitor.interval:
+        last_probe = now
+        for each uplink:
+            probe IPv4
+            probe IPv6 (if ipv6_pd=true or ia_na=true)
+            update state machine
+            if state changed: apply provisioning/deprovisioning actions
+    sleep until last_probe + monitor.interval,
+        waking early on SIGHUP/SIGUSR1/SIGUSR2
 ```
 
 The probe and state update for each uplink are independent — an uplink's IPv4 and IPv6 states are tracked and acted on separately. A single uplink can be IPv4-UP + IPv6-DOWN simultaneously.
+
+**Probe timing is independent of signal wake-ups.** Signals wake the loop early so their work (reconcile, radvd SIGHUP, config reload) is applied promptly, but they do **not** reset the probe timer: probe cycles run at most once per `monitor.interval` no matter how frequently signals arrive. This matters for the same reason as the radvd rate limiting in §5.3.5 — ISPs like Spectrum send RAs every 1–2 seconds, each of which becomes a hook `SIGUSR1`; without the decoupled timer, every such signal would restart the probe cycle and the daemon would probe every 1–2 seconds regardless of the configured interval. The one exception is a config reload (SIGHUP), which resets the timer so that the freshly reset (optimistically UP) uplink states are re-validated by an immediate probe cycle.
 
 #### 5.3.7 Probing
 
