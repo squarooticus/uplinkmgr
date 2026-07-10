@@ -1,4 +1,4 @@
-"""Tests for hooks/50-uplinkmgr's RECONFIGURE handling.
+"""Tests for hooks/dhcpcd-hook's RECONFIGURE handling.
 
 Invokes the hook script directly as a subprocess (no root or real dhcpcd
 required) to verify it replays state correctly -- and safely -- for a
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-_HOOK_PATH = str(Path(__file__).parent.parent / "hooks" / "50-uplinkmgr")
+_HOOK_PATH = str(Path(__file__).parent.parent / "hooks" / "dhcpcd-hook")
 
 
 def _run_hook(env_dir: Path, state_dir: Path, interface: str, reason: str,
