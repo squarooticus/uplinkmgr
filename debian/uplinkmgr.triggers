@@ -1,0 +1,8 @@
+# React whenever the installed dhcpcd-base adds/removes/relocates files in
+# either of the hooks directories used by different dhcpcd-base versions,
+# so our hook symlink (see /usr/lib/uplinkmgr/dhcpcd-hook-link) tracks
+# whichever directory the currently-installed dhcpcd-base actually owns.
+# noawait: this is not critical enough to block dhcpcd-base's own
+# configuration on our postinst running.
+interest-noawait /usr/libexec/dhcpcd-hooks
+interest-noawait /usr/lib/dhcpcd/dhcpcd-hooks

@@ -11,10 +11,12 @@ override_dh_auto_install:
 	install -d debian/uplinkmgr/usr/sbin
 	install -m 755 bin/uplinkmgr bin/uplinkmgr-setup \
 	    debian/uplinkmgr/usr/sbin/
-	# dhcpcd hook
-	install -d debian/uplinkmgr/usr/libexec/dhcpcd-hooks
-	install -m 755 hooks/50-uplinkmgr \
-	    debian/uplinkmgr/usr/libexec/dhcpcd-hooks/
+	# dhcpcd hook (linked at runtime into whichever dhcpcd-hooks directory
+	# dhcpcd-base expects -- see debian/uplinkmgr.triggers and
+	# hooks/dhcpcd-hook-link)
+	install -d debian/uplinkmgr/usr/lib/uplinkmgr
+	install -m 755 hooks/dhcpcd-hook hooks/dhcpcd-hook-link \
+	    debian/uplinkmgr/usr/lib/uplinkmgr/
 	# radvd systemd template unit file
 	install -d debian/uplinkmgr/usr/lib/systemd/system
 	install -m 644 systemd/radvd-uplinkmgr@.service \

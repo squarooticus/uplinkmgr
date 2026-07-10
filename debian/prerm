@@ -9,6 +9,12 @@ case "$1" in
                 systemctl disable --now "$unit" || true
             done
         fi
+        # Strip our symlink from every candidate dhcpcd-hooks dir before
+        # dpkg removes /usr/lib/uplinkmgr/dhcpcd-hook, so no dangling
+        # symlink is left behind.
+        if [ -x /usr/lib/uplinkmgr/dhcpcd-hook-link ]; then
+            /usr/lib/uplinkmgr/dhcpcd-hook-link --remove || true
+        fi
         ;;
 esac
 

@@ -13,6 +13,14 @@ case "$1" in
             # (Re)generate config files if already configured
             uplinkmgr-setup || true
         fi
+        /usr/lib/uplinkmgr/dhcpcd-hook-link || \
+            echo "uplinkmgr: warning: failed to link dhcpcd exit hook" >&2
+        ;;
+    triggered)
+        # dhcpcd-base added/removed files in one of its hooks directories
+        # (see debian/uplinkmgr.triggers) -- re-check which one it owns.
+        /usr/lib/uplinkmgr/dhcpcd-hook-link || \
+            echo "uplinkmgr: warning: failed to link dhcpcd exit hook" >&2
         ;;
 esac
 

@@ -1,0 +1,72 @@
+#!/bin/sh
+# Maintains the 50-uplinkmgr symlink in whichever dhcpcd-hooks directory
+# the currently-installed dhcpcd-base owns. dhcpcd-base has used different
+# directories across versions; this script determines the correct one at
+# run time by ownership (not existence), since a stale, now-unowned
+# directory can survive a dhcpcd-base upgrade if it isn't empty.
+#
+# Usage:
+#   dhcpcd-hook-link            Create/update the symlink in the correct
+#                               directory; remove it from any other
+#                               candidate directory.
+#   dhcpcd-hook-link --remove   Remove the symlink from every candidate
+#                               directory (used when uplinkmgr is removed).
+
+set -e
+
+HOOK_SRC=/usr/lib/uplinkmgr/dhcpcd-hook
+HOOK_NAME=50-uplinkmgr
+
+# First match wins if, somehow, more than one is "owned" at once.
+CANDIDATE_DIRS="/usr/libexec/dhcpcd-hooks /usr/lib/dhcpcd/dhcpcd-hooks"
+
+_is_ours() {
+    [ -L "$1" ] && [ "$(readlink -- "$1")" = "$HOOK_SRC" ]
+}
+
+_unlink_if_ours() {
+    _is_ours "$1" && rm -f -- "$1"
+    return 0
+}
+
+if [ "$1" = "--remove" ]; then
+    for d in $CANDIDATE_DIRS; do
+        _unlink_if_ours "$d/$HOOK_NAME"
+    done
+    exit 0
+fi
+
+# Determine which candidate directory the installed dhcpcd-base owns, by
+# exact (whole-line) match against its file list -- a substring match
+# would risk false positives from doc/example paths.
+target=""
+if list=$(dpkg-query -L dhcpcd-base 2>/dev/null); then
+    for d in $CANDIDATE_DIRS; do
+        if printf '%s\n' "$list" | grep -qFx "$d"; then
+            target="$d"
+            break
+        fi
+    done
+fi
+
+if [ -z "$target" ]; then
+    # dhcpcd-base isn't installed/configured, or owns neither known
+    # location. Nothing sensible to link; don't guess, and don't fail --
+    # the trigger will retry once dhcpcd-base settles.
+    exit 0
+fi
+
+# Clean up a symlink left behind in a directory dhcpcd-base no longer
+# owns (dpkg can't rmdir a now-unowned directory that still contains our
+# symlink, so a stale one can survive a dhcpcd-base version upgrade).
+for d in $CANDIDATE_DIRS; do
+    [ "$d" = "$target" ] && continue
+    _unlink_if_ours "$d/$HOOK_NAME"
+done
+
+if [ -d "$target" ]; then
+    ln -sf -- "$HOOK_SRC" "$target/$HOOK_NAME"
+    echo "uplinkmgr: dhcpcd hook linked from directory $target" >&2
+else
+    echo "uplinkmgr: dhcpcd-hooks dir $target expected but missing; not linking" >&2
+fi

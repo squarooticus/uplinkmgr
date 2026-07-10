@@ -71,7 +71,7 @@ The design goal is to provide the following simultaneously:
 | **RA** | Router Advertisement — ICMPv6 message sent by radvd to announce prefixes, routes, and default gateway to clients. |
 | **SLAAC** | Stateless Address Autoconfiguration — the process by which IPv6 hosts derive addresses from RA-advertised prefixes. |
 | **AdvDefaultPreference** | radvd parameter controlling the preference level (high/medium/low) of the default route announced in RAs. |
-| **Hook** | The dhcpcd exit hook script `/usr/libexec/dhcpcd-hooks/50-uplinkmgr`, invoked by dhcpcd on every lease event. |
+| **Hook** | The dhcpcd exit hook script, installed at `/usr/lib/uplinkmgr/dhcpcd-hook` and symlinked as `50-uplinkmgr` into dhcpcd's hooks directory, invoked by dhcpcd on every lease event. |
 | **uplinkmgr-setup** | The one-shot provisioning tool that generates all configuration files from the YAML config. |
 | **uplinkmgr daemon** | The Python monitoring daemon that tracks uplink health and adjusts the main routing table and radvd configs at runtime. |
 
@@ -321,9 +321,36 @@ Stale systemd units get the same treatment: under systemd, setup enumerates all 
 
 #### 5.2.1 Location
 
-`/usr/libexec/dhcpcd-hooks/50-uplinkmgr`
+The hook script itself is installed by the Debian package at a fixed,
+version-independent path:
 
-This is a shell script installed by the Debian package. dhcpcd sources all files in `/usr/libexec/dhcpcd-hooks/` in lexicographic order on every lease event. The `50-` prefix places it after dhcpcd's own built-in hooks (typically `01-test`, `20-resolv.conf`, `30-hostname`).
+`/usr/lib/uplinkmgr/dhcpcd-hook`
+
+dhcpcd, however, sources every file in a hooks directory whose location
+varies by `dhcpcd-base` version — `/usr/lib/dhcpcd/dhcpcd-hooks` on older
+releases (e.g. dhcpcd-base 10.1), `/usr/libexec/dhcpcd-hooks` on newer ones
+(10.3+). Since the correct directory can't be known at package-build time,
+and can change underneath an already-installed system (e.g. across a
+Debian release upgrade), the package instead maintains a `50-uplinkmgr`
+symlink pointing at `/usr/lib/uplinkmgr/dhcpcd-hook` in whichever directory
+the installed `dhcpcd-base` currently owns. The `50-` prefix places it
+after dhcpcd's own built-in hooks (typically `01-test`, `20-resolv.conf`,
+`30-hostname`).
+
+The symlink is maintained by `/usr/lib/uplinkmgr/dhcpcd-hook-link`, a
+helper script that determines the owning directory via `dpkg-query -L
+dhcpcd-base` (exact match against the known candidate paths, not mere
+directory existence — a stale, now-unowned directory can survive a
+`dhcpcd-base` upgrade if it isn't empty). It runs:
+- from `postinst`'s `configure` case, so a fresh or upgraded install of
+  uplinkmgr links the hook immediately;
+- from `postinst`'s `triggered` case, activated by the `interest-noawait`
+  file triggers declared in `debian/uplinkmgr.triggers` on both candidate
+  directories, so the symlink self-heals if `dhcpcd-base`'s hooks
+  directory changes on an already-installed system without uplinkmgr
+  itself being reinstalled;
+- with `--remove` from `prerm`'s `remove|deconfigure` case, to strip the
+  symlink before uplinkmgr's own files are removed.
 
 #### 5.2.2 Hook Environment
 
@@ -795,7 +822,7 @@ interface eth1
     metric 200
 ```
 
-(No `hook` directive is needed: dhcpcd automatically sources every file in `/usr/libexec/dhcpcd-hooks/`, where the package installs `50-uplinkmgr` — see §5.2.1.)
+(No `hook` directive is needed: dhcpcd automatically sources every file in its hooks directory, where the package symlinks in `50-uplinkmgr` — see §5.2.1.)
 
 **Notes on dhcpcd config:**
 - `allowinterfaces` restricts dhcpcd to the listed WAN and macvlan interfaces, preventing it from managing unrelated interfaces.
@@ -1619,7 +1646,9 @@ Depends: ${python3:Depends}, ${misc:Depends}, python3-yaml, dhcpcd, radvd, iprou
 |------|------|
 | Daemon binary | `/usr/sbin/uplinkmgr` |
 | Setup binary | `/usr/sbin/uplinkmgr-setup` |
-| dhcpcd hook | `/usr/libexec/dhcpcd-hooks/50-uplinkmgr` |
+| dhcpcd hook | `/usr/lib/uplinkmgr/dhcpcd-hook`, symlinked as `50-uplinkmgr` into `/usr/libexec/dhcpcd-hooks` or `/usr/lib/dhcpcd/dhcpcd-hooks` (see §5.2.1) |
+| dhcpcd hook linker | `/usr/lib/uplinkmgr/dhcpcd-hook-link` |
+| dhcpcd hooks-dir triggers | `debian/uplinkmgr.triggers` (`interest-noawait` on both candidate hooks directories) |
 | systemd service | `/lib/systemd/system/uplinkmgr.service` |
 | radvd template unit | `/usr/lib/systemd/system/radvd-uplinkmgr@.service` |
 | Example config | `/usr/share/doc/uplinkmgr/uplinkmgr.yaml.example` |

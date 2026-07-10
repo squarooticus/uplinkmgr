@@ -28,7 +28,7 @@ pytestmark = [
 ]
 
 _HAVE_RADVD = bool(shutil.which("radvd"))
-_HOOK_PATH = str(Path(__file__).parent.parent.parent / "hooks" / "50-uplinkmgr")
+_HOOK_PATH = str(Path(__file__).parent.parent.parent / "hooks" / "dhcpcd-hook")
 
 
 @dataclass
