@@ -132,13 +132,6 @@ from the config. No manual `systemctl` steps are needed after running it.
 Macvlan interfaces are brought up by ifupdown from the generated
 `interfaces.d` stanza, so no additional step is needed for those.
 
-### 4. NAT
-
-uplinkmgr does not configure firewall rules. `uplinkmgr-setup` writes a
-reference nftables masquerade fragment to
-`/etc/uplinkmgr/uplinkmgr-nat.nft.example` as a starting point. Include or
-adapt it in your site's nftables config.
-
 ---
 
 ## Route, address, and prefix management in detail

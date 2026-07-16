@@ -143,13 +143,6 @@ def main() -> None:
                     dry_run,
                 )
 
-    # --- NAT reference fragment ---
-    generator.write_file(
-        "/etc/uplinkmgr/uplinkmgr-nat.nft.example",
-        generator.nat_fragment(cfg),
-        dry_run,
-    )
-
     # --- clean up stale generated files ---
     if not dry_run:
         _remove_stale(cfg, {u.name for u in cfg.uplinks})

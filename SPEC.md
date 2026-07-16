@@ -22,9 +22,8 @@
    - 6.3 [dhcpcd systemd Units](#63-dhcpcd-systemd-units)
    - 6.4 [radvd Configuration Files](#64-radvd-configuration-files)
    - 6.5 [radvd systemd Units](#65-radvd-systemd-units)
-   - 6.6 [nftables NAT Reference Fragment](#66-nftables-nat-reference-fragment)
-   - 6.7 [Routing Table Registration](#67-routing-table-registration)
-   - 6.8 [Uplink Environment Files](#68-uplink-environment-files)
+   - 6.6 [Routing Table Registration](#66-routing-table-registration)
+   - 6.7 [Uplink Environment Files](#67-uplink-environment-files)
 7. [Naming Conventions and Derived Values](#7-naming-conventions-and-derived-values)
 8. [IPv4 Routing Behavior](#8-ipv4-routing-behavior)
 9. [IPv6 Routing and Delegation Behavior](#9-ipv6-routing-and-delegation-behavior)
@@ -53,7 +52,7 @@ The design goal is to provide the following simultaneously:
 ### Scope
 
 - **In scope:** DHCP WAN uplinks, IPv6 prefix delegation and SLAAC, ifupdown + dhcpcd-based configuration, radvd for RA, per-uplink policy routing tables, monitoring with hysteresis, Debian packaging.
-- **Out of scope:** PPPoE, static WAN configurations, DHCPv6 stateful address assignment to clients, firewall and NAT configuration (left to the administrator — uplinkmgr generates a reference nftables fragment but does not apply it), internal DHCP server configuration, ULA prefix advertisement (assumed pre-configured by the administrator in a separate radvd instance).
+- **Out of scope:** PPPoE, static WAN configurations, DHCPv6 stateful address assignment to clients, firewall and NAT configuration (left entirely to the administrator), internal DHCP server configuration, ULA prefix advertisement (assumed pre-configured by the administrator in a separate radvd instance).
 
 ---
 
@@ -98,7 +97,6 @@ The design goal is to provide the following simultaneously:
 │   /etc/network/interfaces.d/uplinkmgr.conf        (macvlan stanzas)    │
 │   /etc/dhcpcd.conf                           (single dhcpcd cfg)  │
 │   /etc/uplinkmgr/radvd/radvd-uplinkmgr-<name>.conf  (radvd cfg)   │
-│   /etc/uplinkmgr/uplinkmgr-nat.nft.example   (NAT reference frag) │
 │   /etc/iproute2/rt_tables.d/uplinkmgr.conf   (table name→number)  │
 │   /etc/uplinkmgr/uplinks/<name>.env          (shell env fragment) │
 └──────────────────────────────────────────────────────────────────┘
@@ -138,7 +136,6 @@ Boot / runtime event flow:
 | Generate dhcpcd configs | ✓ | | |
 | Generate systemd service units | ✓ | | |
 | Generate initial radvd configs | ✓ | | |
-| Generate NAT reference fragment | ✓ | | |
 | Register routing table names/numbers | ✓ | | |
 | Write per-uplink env files | ✓ | | |
 | Write IPv4 gateway state file | | ✓ | |
@@ -270,7 +267,7 @@ After generating files, when systemd is running (`/run/systemd/system` exists) a
 - Enables and restarts `uplinkmgr.service` (picks up uplink-list or monitoring changes).
 - Stops and disables stale `radvd-uplinkmgr@` instances for uplinks no longer configured (§5.1.4).
 
-It never touches nftables — the generated NAT fragment is a reference example only, applied by the administrator. On a non-systemd system these runtime actions are skipped, and the administrator must restart the affected services manually.
+It never touches nftables — firewall and NAT configuration is left entirely to the administrator. On a non-systemd system these runtime actions are skipped, and the administrator must restart the affected services manually.
 
 The dhcpcd config is **fairly static** — it only changes when the uplink or network list is structurally modified (uplinks added/removed, networks added/removed, interface names changed, metric or `ipv6_pd_hint` changed). Day-to-day operation does not require re-running setup.
 
@@ -292,7 +289,6 @@ For each run, `uplinkmgr-setup` writes or overwrites the following files. Existi
 | `/etc/network/interfaces.d/uplinkmgr.conf` | macvlan `iface` stanzas (one per macvlan) |
 | `/etc/dhcpcd.conf` | single dhcpcd config covering all uplinks (previous config backed up to `/etc/dhcpcd.conf.pre-uplinkmgr`) |
 | `/etc/uplinkmgr/radvd/radvd-uplinkmgr-<name>.conf` | radvd config (initial/up state), one per IPv6 uplink |
-| `/etc/uplinkmgr/uplinkmgr-nat.nft.example` | NAT reference fragment (not applied automatically) |
 | `/etc/iproute2/rt_tables.d/uplinkmgr.conf` | routing table name→number mappings |
 | `/etc/uplinkmgr/uplinks/<name>.env` | shell env fragment, one per uplink |
 
@@ -362,7 +358,7 @@ env_file="${UPLINKMGR_ENV_DIR}/${interface}.env"
 . "$env_file"
 ```
 
-The `.env` file exports `UPLINKMGR_UPLINK_NAME`, `UPLINKMGR_WAN_IFACE`, `UPLINKMGR_IPV6_PD`, and `UPLINKMGR_IPV6_IA_NA` (see §6.8). The latter two gate the hook's IPv6 handlers: ROUTERADVERT and BOUND6/EXPIRE6 handling only run when PD and/or IA_NA is enabled for the uplink.
+The `.env` file exports `UPLINKMGR_UPLINK_NAME`, `UPLINKMGR_WAN_IFACE`, `UPLINKMGR_IPV6_PD`, and `UPLINKMGR_IPV6_IA_NA` (see §6.7). The latter two gate the hook's IPv6 handlers: ROUTERADVERT and BOUND6/EXPIRE6 handling only run when PD and/or IA_NA is enabled for the uplink.
 
 **Note:** dhcpcd manages the WAN interface (`eth0`, `eth1`, etc.) **and** all macvlan interfaces for that uplink. Events will fire for each interface. The hook checks `$interface` against `$UPLINKMGR_WAN_IFACE` and returns immediately for macvlan events — all routing and rule management is handled by the daemon, not the hook.
 
@@ -937,36 +933,7 @@ WantedBy=multi-user.target
 - `ExecReload` with SIGHUP allows `systemctl reload` or `systemctl kill --signal=SIGHUP` to trigger config re-read.
 - `--logmethod stderr_clean` sends radvd's log lines to stderr without radvd's own timestamps, since journald captures the unit's stderr and timestamps each line itself.
 
-### 6.6 nftables NAT Reference Fragment
-
-Written to `/etc/uplinkmgr/uplinkmgr-nat.nft.example`.
-
-Firewall and NAT configuration is left to the administrator. `uplinkmgr-setup` generates this reference fragment as a starting point but does **not** apply it automatically.
-
-```nft
-# NAT reference fragment generated by uplinkmgr-setup.
-# This file is NOT applied automatically.
-# Review and incorporate into your nftables configuration as appropriate.
-# Regenerate with: uplinkmgr-setup
-
-table ip uplinkmgr_nat {
-    chain postrouting {
-        type nat hook postrouting priority srcnat; policy accept;
-
-        # Masquerade outbound traffic on all WAN interfaces
-        oifname "eth0" masquerade
-        oifname "eth1" masquerade
-    }
-}
-```
-
-**Notes:**
-- The administrator is responsible for applying these rules to their nftables configuration. The exact method depends on how the administrator has structured their nftables setup.
-- The table name `uplinkmgr_nat` is chosen to avoid conflicts with any existing `nat` table the administrator may have configured.
-- IPv6 NAT (NPTv6) is **not** included — IPv6 uses native global addresses from the delegated prefix. No masquerade is needed or desired for IPv6.
-- `uplinkmgr-setup` regenerates this file with the current set of WAN interfaces whenever the uplinks configuration changes.
-
-### 6.7 Routing Table Registration
+### 6.6 Routing Table Registration
 
 Written to `/etc/iproute2/rt_tables.d/uplinkmgr.conf`.
 
@@ -985,7 +952,7 @@ Written to `/etc/iproute2/rt_tables.d/uplinkmgr.conf`.
 - This file is read by iproute2 tools (`ip route`, `ip rule`) to allow table names to be used in commands.
 - Files in `/etc/iproute2/rt_tables.d/` are merged with the main `/etc/iproute2/rt_tables` file by iproute2 at runtime. Conflicts (duplicate numbers or names) between this file and the main file or other `.d/` files are an error detected by `uplinkmgr-setup`.
 
-### 6.8 Uplink Environment Files
+### 6.7 Uplink Environment Files
 
 Written to `/etc/uplinkmgr/uplinks/<uplink-name>.env`. One file per uplink.
 
@@ -1216,9 +1183,7 @@ These are managed by the daemon on SIGUSR1. They are used for IPv6 source-based 
 
 ### 8.4 NAT
 
-NAT configuration is the administrator's responsibility. `uplinkmgr-setup` generates a reference nftables fragment at `/etc/uplinkmgr/uplinkmgr-nat.nft.example` as a starting point, but does not apply it.
-
-The reference fragment masquerades all outbound traffic on WAN interfaces. Because dead uplinks have their default routes removed from the uplinkmgr table, traffic cannot reach those interfaces; masquerade rules for dead uplinks are never triggered even if left in place.
+NAT configuration is the administrator's responsibility; uplinkmgr does not generate or apply any NAT rules. Because dead uplinks have their default routes removed from the uplinkmgr table, traffic cannot reach those interfaces; masquerade rules for dead uplinks are never triggered even if left in place.
 
 ---
 
@@ -1812,13 +1777,12 @@ However:
 5. **radvd `prefix ::/64` fallback:** The initial radvd config (generated by `uplinkmgr-setup`) uses `prefix ::/64` as a placeholder until the first PD is received. If radvd cannot derive the delegated prefix automatically from the macvlan interface's assigned address, clients will not receive a useful prefix until the daemon regenerates the config after the first SIGUSR1 from the hook. This is a boot-time-only window.
 6. **Restart gap on lifetime refresh:** When the daemon restarts a radvd instance to apply fresh lifetimes (on SIGUSR1), there is a brief window (typically < 1 second) during which radvd is not sending RAs. Clients will not notice a gap this short. There is also a sub-second race between the daemon computing remaining lifetimes and radvd starting its countdown from those values, meaning advertised lifetimes may be very slightly longer than the upstream values.
 7. **Asymmetric uplink indices after config change:** If an uplink is removed from the middle of the `uplinks:` list, all subsequent uplinks' indices, MACs, link-locals, and routing table numbers change. This requires a full re-run of `uplinkmgr-setup`, restart of all affected services, and the administrator should be warned that existing client addresses become stale.
-8. **NAT not automatic:** `uplinkmgr-setup` generates a reference nftables fragment at `/etc/uplinkmgr/uplinkmgr-nat.nft.example` but does not apply it. The administrator is responsible for incorporating NAT rules into their firewall configuration.
 
 ### 16.4 Security Considerations
 
 - The dhcpcd hook script runs as root (dhcpcd runs as root). The env files in `/etc/uplinkmgr/uplinks/` must be readable only by root (`chmod 600`) since they could be used to influence hook behavior.
 - `/run/uplinkmgr/` contains gateway IP addresses (state files). These are not sensitive but should be owned by root.
-- uplinkmgr does not configure any firewall rules. The administrator is responsible for NAT and inbound filtering. The reference fragment at `/etc/uplinkmgr/uplinkmgr-nat.nft.example` provides a starting point for masquerade rules.
+- uplinkmgr does not configure any firewall rules. The administrator is responsible for NAT and inbound filtering.
 
 ---
 
@@ -1838,7 +1802,7 @@ The following items require verification against upstream documentation or testi
 | 8 | radvd | ~~Whether `prefix ::/64` with `AdvRouterAddr on` causes radvd to auto-use the interface's assigned /64 prefix~~ **Assumed correct:** each macvlan interface has exactly one global address assigned via PD, so radvd should pick it up unambiguously. To be verified by testing. | — |
 | 9 | radvd binary | ~~Correct command-line flags: `--nodaemon`, `--config`, `--pidfile`, `--configtest` on Debian 13's radvd 2.19~~ **Confirmed:** all four flags exist and are valid, but `--nodaemon` must **not** be combined with `Type=forking` (it prevents radvd from forking, so systemd can't track it via `PIDFile`), and `--configtest` must run via `ExecStartPre`, not a second `ExecStart` (`Type=forking` permits only one `ExecStart` directive). See §6.5. | — |
 | 10 | ifupdown | ~~Whether `inet manual` ifaces with only `pre-up`/`up`/`down` stanzas are processed correctly; whether `auto` is needed~~ **Confirmed:** `inet manual` ifaces accept `pre-up`/`up`/`down`/`post-down` stanzas; `auto` is required to activate them at boot. | — |
-| 11 | nftables | ~~Whether `/etc/nftables.d/` exists and is included by default in Debian 13's `/etc/nftables.conf`~~ **Resolved:** `/etc/nftables.d/` is not created by the nftables package and is not loaded by default. nftables.service may also be disabled on install. NAT configuration is left entirely to the administrator; uplinkmgr-setup generates a reference fragment only. | — |
+| 11 | nftables | ~~Whether `/etc/nftables.d/` exists and is included by default in Debian 13's `/etc/nftables.conf`~~ **Resolved:** `/etc/nftables.d/` is not created by the nftables package and is not loaded by default. nftables.service may also be disabled on install. NAT configuration is left entirely to the administrator. | — |
 | 12 | iproute2 | ~~Behavior when `ip route add` is called for a route that already exists~~ **Confirmed:** `ip route add` errors on a duplicate route. All route installation uses `ip route replace` throughout. | — |
 | 13 | kernel | ~~Behavior of `addr_gen_mode=1` set in `pre-up` — whether it persists after the interface is deleted and recreated~~ **Resolved:** set it unconditionally in every `pre-up` stanza regardless of prior state. | — |
 | 14 | ping | ~~Whether `ping6` is available separately or merged into `ping` on Debian 13's `iputils-ping`~~ **Confirmed:** `ping6` is provided by `iputils-ping`. | — |
