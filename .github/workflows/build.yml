@@ -1,0 +1,92 @@
+on: push
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-debs:
+    runs-on: ubuntu-latest
+    container: debian:testing-slim
+    permissions:
+      contents: write
+
+    steps:
+      - name: Initialize container workspace
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends git dpkg-dev devscripts debhelper build-essential equivs
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+          fetch-tags: true
+
+      - name: Work around permissions
+        run: |
+          git config --global --add safe.directory "$(pwd)"
+
+      - name: Derive release version
+        id: relver
+        if: github.ref_type == 'tag'
+        run: |
+          FROMTAG="${GITHUB_REF#refs/tags/v}"
+          FROMLOG=$(dpkg-parsechangelog -SVersion)
+          if [ "$FROMTAG" != "$FROMLOG" ]; then
+            echo "Version from tag ($FROMTAG) does not match version from Debian changelog ($FROMLOG)" >&2
+            exit 1
+          fi
+          echo "version=$FROMTAG" >>$GITHUB_OUTPUT
+
+      - name: Derive CI version
+        id: civer
+        if: github.ref_type != 'tag'
+        run: |
+          BASE=$(dpkg-parsechangelog -SVersion)
+          if git rev-parse -q --verify "refs/tags/v${BASE}" >/dev/null; then
+            BASE=${BASE}.0.0.1
+          fi
+          DATE=$(date -u +%Y%m%d)
+          SHA=$(git rev-parse --short HEAD)
+          VERSION="${BASE}~git${DATE}.${SHA}"
+          echo "version=$VERSION" >>$GITHUB_OUTPUT
+
+      - name: Patch changelog for CI build
+        if: github.ref_type != 'tag'
+        env:
+          DEBEMAIL: noreply@github.com
+          DEBFULLNAME: GitHub Actions
+        run: |
+          dch --newversion "${{ steps.civer.outputs.version }}" \
+              --distribution unstable \
+              --no-auto-nmu \
+              --force-bad-version \
+              "Automated CI build ($(git rev-parse HEAD))."
+
+      - name: Install build dependencies
+        run: |
+          mk-build-deps
+          apt install -y --no-install-recommends ./*-build-dep*.deb
+
+      - name: Build
+        id: build
+        run: |
+          DEB_BUILD_OPTIONS=noautodbgsym dpkg-buildpackage -b -us -uc
+          echo "built_deb=$(readlink -f ../uplinkmgr_*.deb)" >>$GITHUB_OUTPUT
+
+      - name: Upload artifact (branch push)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: uplinkmgr_${{ steps.civer.outputs.version }}_amd64
+          path: ${{ steps.build.outputs.built_deb }}
+          retention-days: 30
+
+      - name: Create GitHub Release (tag push)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3.0.1
+        with:
+          name: uplinkmgr ${{ steps.relver.outputs.version }}
+          files: ${{ steps.build.outputs.built_deb }}
+          prerelease: false
