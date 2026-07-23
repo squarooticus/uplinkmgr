@@ -58,10 +58,13 @@ def test_ipv6_priority_ordering_and_uniqueness(n_uplinks, n_networks):
         for ui in range(n_uplinks)
         for ni in range(n_networks)
     ]
+    pd_lo_prios = [
+        priority.ipv6_pd_lo_to_uplink_priority(cfg, i) for i in range(n_uplinks)
+    ]
 
     assert internal == base
 
-    all_prios = [internal] + fwd_prios + lo_prios + prohibit_prios
+    all_prios = [internal] + fwd_prios + lo_prios + prohibit_prios + pd_lo_prios
     assert all_prios == sorted(all_prios), "IPv6 priorities not strictly ordered"
     assert len(set(all_prios)) == len(all_prios), "IPv6 priorities not unique"
 

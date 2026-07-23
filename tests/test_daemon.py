@@ -475,6 +475,86 @@ class TestReconcileIPv6:
 
 
 # ---------------------------------------------------------------------------
+# Reconcile IPv6 pd_lo_to_uplink
+# ---------------------------------------------------------------------------
+
+class TestReconcileIPv6PdLoToUplink:
+    def test_pd_state_present_and_up_installs_rule(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)])
+        write_state(tmp_path, "isp", "ipv6pd", {
+            "delegated_prefix": "2001:db8::", "delegated_length": "56",
+            "vltime": "86400", "pltime": "14400", "timestamp": "1000000",
+        })
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.routing") as r:
+            d._reconcile_uplink_ipv6(cfg.uplinks[0])
+
+        r.add_ipv6_lo_to_uplink_rule.assert_called_once()
+        assert r.add_ipv6_lo_to_uplink_rule.call_args.args[0] == "2001:db8::/56"
+        assert r.add_ipv6_lo_to_uplink_rule.call_args.args[1] == 161
+        assert d._installed["isp"].pd_lo_to_uplink_prefix == "2001:db8::/56"
+
+    def test_pd_state_absent_no_rule_installed(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)])
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.routing") as r:
+            d._reconcile_uplink_ipv6(cfg.uplinks[0])
+
+        r.add_ipv6_lo_to_uplink_rule.assert_not_called()
+        assert d._installed["isp"].pd_lo_to_uplink_prefix is None
+
+    def test_pd_state_present_but_down_removes_rule(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)])
+        write_state(tmp_path, "isp", "ipv6pd", {
+            "delegated_prefix": "2001:db8::", "delegated_length": "56",
+            "vltime": "86400", "pltime": "14400", "timestamp": "1000000",
+        })
+        d = _make_daemon(cfg, tmp_path)
+        d._installed["isp"].pd_lo_to_uplink_prefix = "2001:db8::/56"
+        d._states["isp"].ipv6 = LinkState.DOWN
+
+        with patch("uplinkmgr.daemon.routing") as r:
+            d._reconcile_uplink_ipv6(cfg.uplinks[0])
+
+        r.del_ipv6_rule.assert_called_once()
+        r.add_ipv6_lo_to_uplink_rule.assert_not_called()
+        assert d._installed["isp"].pd_lo_to_uplink_prefix is None
+
+    def test_pd_prefix_change_replaces_rule(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)])
+        write_state(tmp_path, "isp", "ipv6pd", {
+            "delegated_prefix": "2001:db8:bbbb::", "delegated_length": "56",
+            "vltime": "86400", "pltime": "14400", "timestamp": "1000000",
+        })
+        d = _make_daemon(cfg, tmp_path)
+        d._installed["isp"].pd_lo_to_uplink_prefix = "2001:db8:aaaa::/56"
+
+        with patch("uplinkmgr.daemon.routing") as r:
+            d._reconcile_uplink_ipv6(cfg.uplinks[0])
+
+        r.del_ipv6_rule.assert_called_once()
+        r.add_ipv6_lo_to_uplink_rule.assert_called_once()
+        assert d._installed["isp"].pd_lo_to_uplink_prefix == "2001:db8:bbbb::/56"
+
+    def test_no_change_when_already_installed(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)])
+        write_state(tmp_path, "isp", "ipv6pd", {
+            "delegated_prefix": "2001:db8::", "delegated_length": "56",
+            "vltime": "86400", "pltime": "14400", "timestamp": "1000000",
+        })
+        d = _make_daemon(cfg, tmp_path)
+        d._installed["isp"].pd_lo_to_uplink_prefix = "2001:db8::/56"
+
+        with patch("uplinkmgr.daemon.routing") as r:
+            d._reconcile_uplink_ipv6(cfg.uplinks[0])
+
+        r.add_ipv6_lo_to_uplink_rule.assert_not_called()
+        r.del_ipv6_rule.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Teardown
 # ---------------------------------------------------------------------------
 
@@ -496,6 +576,19 @@ class TestTeardownAll:
         r.del_ipv6_route.assert_called()
         r.del_ipv4_policy_rules.assert_called_once()
         r.del_ipv6_policy_rule.assert_called_once()
+
+    def test_pd_lo_to_uplink_rule_is_torn_down(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)])
+        d = _make_daemon(cfg, tmp_path)
+        d._installed["isp"].pd_lo_to_uplink_prefix = "2001:db8::/56"
+        d._ipv4_rules_installed = True
+        d._ipv6_rule_installed = True
+
+        with patch("uplinkmgr.daemon.routing") as r:
+            d._teardown_all()
+
+        r.del_ipv6_rule.assert_called_once()
+        assert d._installed["isp"].pd_lo_to_uplink_prefix is None
 
     def test_ia_na_only_ipv6_route_is_torn_down(self, tmp_path):
         """Regression for Bug B: _teardown_all must handle ia_na-only uplinks."""
