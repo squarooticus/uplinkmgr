@@ -596,7 +596,7 @@ The suppress rules cause traffic to route via connected/local routes in the main
 
 **Per-uplink IPv4 `lo_to_uplink` rules** (reconciled from `ipv4.state`):
 ```sh
-ip rule add from <wan_ip> lookup <per_uplink_table> priority <ipv4_lo_to_uplink_priority>
+ip rule add from <wan_ip> iif lo lookup <per_uplink_table> priority <ipv4_lo_to_uplink_priority>
 ip route replace default via <GW4> dev <wan_iface> metric 0 table <per_uplink_table>
 ```
 The per-uplink table default route (metric 0, present whenever the shared-table route is present) is what the lo_to_uplink rule resolves to. This ensures router-originated traffic bound to a specific WAN IP exits via the correct uplink rather than the highest-metric uplink.
@@ -1067,7 +1067,7 @@ Let `N = len(uplinks) * len(networks)`, `M = len(networks)`.
 **IPv4 rules** (`ip rule` — separate priority namespace from `ip -6 rule`):
 
 - `rule_priority_start + 0` (`ipv4_internal_traffic`): `lookup main suppress_prefixlength 0` — global; installed at startup.
-- `rule_priority_start + 1 + uplink_idx` (`ipv4_lo_to_uplink`): `from <wan_ip> lookup <per_uplink_table>` — per uplink; installed when `ipv4.state` is present and uplink is UP.
+- `rule_priority_start + 1 + uplink_idx` (`ipv4_lo_to_uplink`): `from <wan_ip> iif lo lookup <per_uplink_table>` — per uplink; installed when `ipv4.state` is present and uplink is UP.
 - `rule_priority_start + 1 + len(uplinks)` (`ipv4_fwd_to_wan`): `lookup uplinkmgr` — global; installed at startup.
 
 **IPv6 rules** (`ip -6 rule` — separate priority namespace from IPv4):
@@ -1076,14 +1076,15 @@ Let `N = len(uplinks) * len(networks)`, `M = len(networks)`.
 - `rule_priority_start + 1 + uplink_idx * M + net_idx` (`ipv6_fwd_to_uplink`): per macvlan; `reject_wrong_pd_src` off: `iif <macvlan> lookup <table>`; on: `from <delegated-prefix>/<len> iif <macvlan> lookup <table>`. **Static for the daemon's lifetime:** installed once, unconditionally, at startup for every `(uplink, network)` pair (`Daemon._setup_ipv6_macvlan_rules()`) — not gated on PD state or uplink health. When `reject_wrong_pd_src` is on, the `from` constraint is updated in place as PD state changes, but the rule itself is never deleted while the daemon runs; if PD is lost, the last-known constraint is left in place rather than reverted (harmless — radvd will have told clients to stop using that prefix, so no legitimate traffic should carry it as a source; see §17). Full removal only happens in `_teardown_all()` (daemon shutdown or config reload). This is deliberately different from `ipv6_lo_to_uplink` and `ipv6_reject_wrong_pd_src` below, which remain driven by live state — see §17 for rationale.
 - `rule_priority_start + 1 + N + uplink_idx` (`ipv6_lo_to_uplink`): `from <prefix> iif lo lookup <table>`. For managed networks: `from <ia_na_addr>/128`; for SLAAC networks: `from <ra_prefix>/<ra_plen>` (covers all kernel-assigned addresses from the RA prefix, including privacy addresses). Installed when state is known and uplink is UP.
 - `rule_priority_start + 1 + N + len(uplinks) + uplink_idx * M + net_idx` (`ipv6_reject_wrong_pd_src`): `iif <macvlan> prohibit` — only when `reject_wrong_pd_src: true`.
+- `rule_priority_start + 1 + N + len(uplinks) + N + uplink_idx` (`ipv6_pd_lo_to_uplink`): `from <delegated-prefix>/<len> iif lo lookup <table>` — per uplink; installed when a PD delegation is known (`ipv6pd.state` present) and uplink is UP. Covers locally-generated (router-originated) packets sourced from a PD-derived address assigned to one of the uplink's internal macvlan interfaces (see §9.3).
 
 Example with 2 uplinks (`comcast`=0, `starlink`=1), 2 networks, `reject_wrong_pd_src: true`, `rule_priority_start`=29000 (N=4, M=2):
 
 ```
 # ip rule show (IPv4)
 29000:  from all lookup main suppress_prefixlength 0         (ipv4_internal_traffic)
-29001:  from <comcast-wan-ip> lookup 161                     (ipv4_lo_to_uplink, comcast)
-29002:  from <starlink-wan-ip> lookup 162                    (ipv4_lo_to_uplink, starlink)
+29001:  from <comcast-wan-ip> iif lo lookup 161              (ipv4_lo_to_uplink, comcast)
+29002:  from <starlink-wan-ip> iif lo lookup 162             (ipv4_lo_to_uplink, starlink)
 29003:  from all lookup 160                                  (ipv4_fwd_to_wan)
 
 # ip -6 rule show (IPv6)
@@ -1098,6 +1099,8 @@ Example with 2 uplinks (`comcast`=0, `starlink`=1), 2 networks, `reject_wrong_pd
 29008:  iif vlan20-u0 prohibit
 29009:  iif vlan10-u1 prohibit
 29010:  iif vlan20-u1 prohibit
+29011:  from <comcast-pd>/48 iif lo lookup 161               (ipv6_pd_lo_to_uplink, comcast)
+29012:  from <starlink-pd>/48 iif lo lookup 162              (ipv6_pd_lo_to_uplink, starlink)
 ```
 
 **Rule update semantics:** `ip rule del` + `ip rule add` is **not atomic** — a brief window exists where no rule is present. The daemon avoids unnecessary del+add by tracking installed rule parameters and only reinstalling when parameters change. `lo_to_uplink` rules are reinstalled if the uplink address/prefix changes.
@@ -1131,8 +1134,8 @@ The daemon installs two global policy rules and a default route per uplink in th
 ```
 # ip rule show (relevant entries)
 29000:  lookup main suppress_prefixlength 0         # ipv4_internal_traffic
-29001:  from 203.0.113.10 lookup 161                # ipv4_lo_to_uplink (comcast wan ip)
-29002:  from 198.51.100.50 lookup 162               # ipv4_lo_to_uplink (starlink wan ip)
+29001:  from 203.0.113.10 iif lo lookup 161         # ipv4_lo_to_uplink (comcast wan ip)
+29002:  from 198.51.100.50 iif lo lookup 162        # ipv4_lo_to_uplink (starlink wan ip)
 29003:  lookup uplinkmgr                            # ipv4_fwd_to_wan
 32767:  lookup main (kernel default, always present)
 
@@ -1219,6 +1222,8 @@ The client auto-configures multiple global addresses via SLAAC. When sending a p
 When a packet arrives at `vlan10-u0` (sent by a client to `fe80::1:1`), the ip -6 rule `iif vlan10-u0 lookup uplinkmgr_comcast` directs it to the comcast routing table, ensuring it exits `eth0` regardless of the client's source address (as long as the packet arrived on the correct macvlan).
 
 This prevents a client that sends a packet to `fe80::1:1` (comcast router) from having the packet routed out `eth1` (starlink). It also means a client cannot accidentally use comcast's router as a default gateway for traffic that should use starlink.
+
+PD addresses aren't only assigned to clients — the delegated prefix is also assigned to the router's own internal-facing macvlan interfaces (e.g. `vlan10-u0` gets an address within `2001:db8:aaaa:0000::/64`). If the router itself originates a packet (e.g. a DNS query, NTP request, or diagnostic probe) sourced from one of these PD-derived addresses, the `ipv6_fwd_to_uplink` rule doesn't apply (it only matches traffic ingressing on a macvlan, not `iif lo`). The `ipv6_pd_lo_to_uplink` rule (§7.5) fills this gap: `from <delegated-prefix>/<len> iif lo lookup <table>`, installed per uplink whenever that uplink's delegated prefix is known and the uplink is UP. This ensures router-originated traffic sourced from a PD address exits via the correct uplink, and — like `ipv6_lo_to_uplink` — is withdrawn as soon as the uplink is marked DOWN so self-generated traffic doesn't linger on a failing uplink merely because its PD state file is still present.
 
 ### 9.4 Optional Wrong-PD Source Rejection
 

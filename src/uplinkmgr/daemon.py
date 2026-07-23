@@ -32,6 +32,7 @@ class _UplinkRouting:
     ipv4_lo_to_uplink_addr: Optional[str] = None      # from-addr in IPv4 lo_to_uplink rule
     ipv6_route_installed: bool = False                 # per-uplink IPv6 default route present
     lo_to_uplink_prefix: Optional[str] = None         # from-prefix in IPv6 lo_to_uplink rule
+    pd_lo_to_uplink_prefix: Optional[str] = None      # from-prefix in IPv6 pd_lo_to_uplink rule
     macvlan_fwd: dict[str, Optional[str]] = field(default_factory=dict)  # mv -> prefix or None
     macvlan_prohibit: set[str] = field(default_factory=set)
 
@@ -470,6 +471,26 @@ class Daemon:
                 )
             installed.lo_to_uplink_prefix = uplink_prefix
 
+        # pd_lo_to_uplink rule: present iff a delegated PD prefix is known AND
+        # health is UP -- covers locally-generated packets sourced from a
+        # PD-derived address assigned to an internal macvlan interface.
+        pd_prefix = (
+            f"{pd_st.delegated_prefix}/{pd_st.delegated_length}"
+            if pd_st is not None and health.ipv6 == LinkState.UP
+            else None
+        )
+        if pd_prefix != installed.pd_lo_to_uplink_prefix:
+            if installed.pd_lo_to_uplink_prefix is not None:
+                routing.del_ipv6_rule(
+                    priority.ipv6_pd_lo_to_uplink_priority(cfg, uplink.index)
+                )
+            if pd_prefix is not None:
+                routing.add_ipv6_lo_to_uplink_rule(
+                    pd_prefix, tbl,
+                    priority.ipv6_pd_lo_to_uplink_priority(cfg, uplink.index),
+                )
+            installed.pd_lo_to_uplink_prefix = pd_prefix
+
         # Per-macvlan rules: fwd_to_uplink is static (installed once at
         # startup, see _setup_ipv6_macvlan_rules) -- only its from-constraint
         # is updated here as PD state changes. The reject_wrong_pd_src
@@ -573,6 +594,12 @@ class Daemon:
                     priority.ipv6_lo_to_uplink_priority(cfg, uplink.index)
                 )
                 installed.lo_to_uplink_prefix = None
+
+            if installed.pd_lo_to_uplink_prefix is not None:
+                routing.del_ipv6_rule(
+                    priority.ipv6_pd_lo_to_uplink_priority(cfg, uplink.index)
+                )
+                installed.pd_lo_to_uplink_prefix = None
 
             self._teardown_macvlan_rules(uplink, installed)
 

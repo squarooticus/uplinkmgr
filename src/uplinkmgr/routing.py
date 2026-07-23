@@ -99,7 +99,7 @@ def add_ipv6_reject_wrong_pd_src_rule(mv: str, priority: int) -> None:
 
 def add_ipv4_lo_to_uplink_rule(addr: str, table: int, priority: int) -> None:
     _run(["ip", "rule", "add",
-          "from", addr,
+          "from", addr, "iif", "lo",
           "lookup", str(table), "priority", str(priority)])
 
 

@@ -148,7 +148,7 @@ def test_add_ipv4_lo_to_uplink_rule():
         routing.add_ipv4_lo_to_uplink_rule("10.0.0.5", 161, 29002)
     assert _cmd(m) == [
         "ip", "rule", "add",
-        "from", "10.0.0.5",
+        "from", "10.0.0.5", "iif", "lo",
         "lookup", "161", "priority", "29002",
     ]
 
