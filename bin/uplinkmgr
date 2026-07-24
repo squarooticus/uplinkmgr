@@ -7,6 +7,7 @@ import argparse
 import logging
 
 from uplinkmgr import config as cfg_mod
+from uplinkmgr import hooks as hooks_mod
 from uplinkmgr.daemon import Daemon, DEFAULT_STATE_DIR
 
 
@@ -23,6 +24,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_STATE_DIR,
         metavar="DIR",
         help=f"runtime state directory (default: {DEFAULT_STATE_DIR})",
+    )
+    p.add_argument(
+        "--hooks-system-dir",
+        default=hooks_mod.HOOKS_SYSTEM_DIR,
+        metavar="DIR",
+        help=f"system event hooks directory (default: {hooks_mod.HOOKS_SYSTEM_DIR})",
+    )
+    p.add_argument(
+        "--hooks-user-dir",
+        default=hooks_mod.HOOKS_USER_DIR,
+        metavar="DIR",
+        help=f"admin event hooks directory (default: {hooks_mod.HOOKS_USER_DIR})",
     )
     p.add_argument(
         "--log-level",
@@ -54,7 +67,9 @@ def main() -> None:
         format=log_format(args.log_clean),
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
-    daemon = Daemon(config_path=args.config, state_dir=args.state_dir)
+    daemon = Daemon(config_path=args.config, state_dir=args.state_dir,
+                     hooks_system_dir=args.hooks_system_dir,
+                     hooks_user_dir=args.hooks_user_dir)
     daemon.run()
 
 

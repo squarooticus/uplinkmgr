@@ -25,6 +25,15 @@ _PREF_LOW = "low"
 _FALLBACK_LIFETIME = generator.INITIAL_DEFAULT_LIFETIME
 
 
+def primary_ipv6_uplink(cfg: Config, states: dict[str, UplinkState]) -> Optional[UplinkConfig]:
+    """Return the highest-priority UP IPv6 uplink (radvd 'high' preference
+    tier), or None if none are UP. Shared with daemon.py's primary-change
+    tracking so both use exactly the same notion of "primary"."""
+    ipv6_uplinks = [u for u in cfg.uplinks if u.ipv6_pd]
+    up_uplinks = [u for u in ipv6_uplinks if states[u.name].ipv6 == LinkState.UP]
+    return up_uplinks[0] if up_uplinks else None
+
+
 def regenerate_all(
     cfg: Config,
     states: dict[str, UplinkState],
@@ -41,13 +50,13 @@ def regenerate_all(
 
     # Determine preference tiers based on IPv6 state
     ipv6_uplinks = [u for u in cfg.uplinks if u.ipv6_pd]
-    up_uplinks = [u for u in ipv6_uplinks if states[u.name].ipv6 == LinkState.UP]
+    primary = primary_ipv6_uplink(cfg, states)
 
     def preference_for(uplink: UplinkConfig) -> str:
         if states[uplink.name].ipv6 == LinkState.DOWN:
             return _PREF_LOW
         # highest-priority UP uplink gets high; rest get medium
-        if up_uplinks and up_uplinks[0].name == uplink.name:
+        if primary is not None and primary.name == uplink.name:
             return _PREF_HIGH
         return _PREF_MEDIUM
 
@@ -78,7 +87,7 @@ def regenerate_all(
         is_secondary = (
             cfg.exclusive_preferred_pd
             and not is_down
-            and not (up_uplinks and up_uplinks[0].name == uplink.name)
+            and not (primary is not None and primary.name == uplink.name)
         )
         if is_secondary:
             preferred_lifetime = 0

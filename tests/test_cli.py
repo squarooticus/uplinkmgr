@@ -49,3 +49,14 @@ class TestParseArgs:
     def test_log_clean_flag_sets_true(self):
         args = cli.parse_args(["--log-clean"])
         assert args.log_clean is True
+
+    def test_hooks_dirs_default_to_module_constants(self):
+        args = cli.parse_args([])
+        assert args.hooks_system_dir == cli.hooks_mod.HOOKS_SYSTEM_DIR
+        assert args.hooks_user_dir == cli.hooks_mod.HOOKS_USER_DIR
+
+    def test_hooks_dirs_overridable(self):
+        args = cli.parse_args(["--hooks-system-dir", "/tmp/sys",
+                                "--hooks-user-dir", "/tmp/user"])
+        assert args.hooks_system_dir == "/tmp/sys"
+        assert args.hooks_user_dir == "/tmp/user"

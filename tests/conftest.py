@@ -5,7 +5,7 @@ import pytest
 from uplinkmgr.config import (
     Config, MonitorConfig, NetworkConfig, UplinkConfig,
     DEFAULT_ROUTING_TABLE_START, DEFAULT_RULE_PRIORITY_START,
-    DEFAULT_RADVD_MIN_RESTART_INTERVAL,
+    DEFAULT_RADVD_MIN_RESTART_INTERVAL, DEFAULT_HOOK_TIMEOUT,
 )
 
 
@@ -45,6 +45,7 @@ def make_config(networks=None, uplinks=None, **kwargs) -> Config:
         exclusive_preferred_pd=kwargs.get("exclusive_preferred_pd", False),
         radvd_min_restart_interval=kwargs.get("radvd_min_restart_interval",
                                                DEFAULT_RADVD_MIN_RESTART_INTERVAL),
+        hook_timeout=kwargs.get("hook_timeout", DEFAULT_HOOK_TIMEOUT),
         monitor=kwargs.get("monitor", make_monitor()),
         networks=networks if networks is not None else [make_network()],
         uplinks=uplinks if uplinks is not None else [make_uplink()],

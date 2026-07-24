@@ -1,0 +1,46 @@
+#!/bin/sh
+# Example uplinkmgr event hook.
+#
+# Ships non-executable (mode 0644) purely as documentation -- it is never
+# run. To use it: copy to /etc/uplinkmgr/hooks/<name>, edit, and
+# chmod 755. Files are sorted lexically by filename across both
+# /usr/libexec/uplinkmgr/hooks/ (system) and /etc/uplinkmgr/hooks/ (admin);
+# an /etc file shadows a same-stem /usr/libexec file (filename with any
+# leading "<digits>-" stripped), letting an admin override a system hook's
+# content, its position, or both. See SPEC.md for the full event/env
+# reference.
+#
+# argv: $1 = event, $2 = uplink name (or new-primary name for
+# primary-change; empty for reload/daemon-start/daemon-stop)
+#
+# Always set: UPLINKMGR_EVENT, UPLINKMGR_TIMESTAMP, UPLINKMGR_STATE_DIR,
+# UPLINKMGR_CONFIG_PATH
+#
+# wan-up / wan-down also set: UPLINKMGR_UPLINK, UPLINKMGR_INTERFACE,
+# UPLINKMGR_FAMILY (ipv4|ipv6), UPLINKMGR_UPLINK_INDEX, UPLINKMGR_METRIC,
+# UPLINKMGR_GATEWAY, UPLINKMGR_ADDRESS, and for ipv6 UPLINKMGR_PREFIX /
+# UPLINKMGR_PREFIX_LENGTH when known
+#
+# primary-change also sets: UPLINKMGR_FAMILY, UPLINKMGR_OLD_PRIMARY,
+# UPLINKMGR_NEW_PRIMARY, UPLINKMGR_INTERFACE
+
+event="$1"
+uplink="$2"
+
+case "$event" in
+    wan-up)
+        logger -t uplinkmgr-hook "uplink $uplink ($UPLINKMGR_FAMILY) is up"
+        ;;
+    wan-down)
+        logger -t uplinkmgr-hook "uplink $uplink ($UPLINKMGR_FAMILY) is down"
+        ;;
+    primary-change)
+        logger -t uplinkmgr-hook "primary $UPLINKMGR_FAMILY uplink: ${UPLINKMGR_OLD_PRIMARY:-(none)} -> ${UPLINKMGR_NEW_PRIMARY:-(none)}"
+        ;;
+    reload)
+        logger -t uplinkmgr-hook "config reloaded from $UPLINKMGR_CONFIG_PATH"
+        ;;
+    daemon-start|daemon-stop)
+        logger -t uplinkmgr-hook "$event"
+        ;;
+esac

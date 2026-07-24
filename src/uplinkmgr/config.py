@@ -25,6 +25,7 @@ DEFAULT_V4_HOSTS = ["8.8.8.8", "1.1.1.1"]
 DEFAULT_V6_HOSTS = ["2001:4860:4860::8888", "2606:4700:4700::1111"]
 DEFAULT_METRIC_MULTIPLIER = 100
 DEFAULT_IPV6_PD_HINT = 56
+DEFAULT_HOOK_TIMEOUT = 10
 
 
 @dataclass
@@ -61,6 +62,7 @@ class Config:
     reject_wrong_pd_src: bool
     exclusive_preferred_pd: bool
     radvd_min_restart_interval: int
+    hook_timeout: int
     monitor: MonitorConfig
     networks: list[NetworkConfig]
     uplinks: list[UplinkConfig]
@@ -96,9 +98,12 @@ def load(path: str = DEFAULT_CONFIG_PATH) -> Config:
     exclusive_preferred_pd = bool(top.get("exclusive_preferred_pd", False))
     radvd_min_restart_interval = int(top.get("radvd_min_restart_interval",
                                               DEFAULT_RADVD_MIN_RESTART_INTERVAL))
+    hook_timeout = int(top.get("hook_timeout", DEFAULT_HOOK_TIMEOUT))
 
     if not (1 <= routing_table_start <= 252):
         _die(f"routing_table_start must be 1–252, got {routing_table_start}")
+    if hook_timeout <= 0:
+        _die(f"hook_timeout must be positive, got {hook_timeout}")
 
     monitor = _parse_monitor(top.get("monitor", {}))
     networks = _parse_networks(top.get("networks", []))
@@ -123,6 +128,7 @@ def load(path: str = DEFAULT_CONFIG_PATH) -> Config:
         reject_wrong_pd_src=reject_wrong_pd_src,
         exclusive_preferred_pd=exclusive_preferred_pd,
         radvd_min_restart_interval=radvd_min_restart_interval,
+        hook_timeout=hook_timeout,
         monitor=monitor,
         networks=networks,
         uplinks=uplinks,
