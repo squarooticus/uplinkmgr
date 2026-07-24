@@ -19,6 +19,10 @@ override_dh_auto_install:
 	install -d debian/uplinkmgr/usr/lib/systemd/system
 	install -m 644 systemd/radvd-uplinkmgr@.service \
 	    debian/uplinkmgr/usr/lib/systemd/system/
+	# Event hooks: system-installed (package-managed) and
+	# administrator-installed drop-in directories, shipped empty.
+	install -d debian/uplinkmgr/usr/libexec/uplinkmgr/hooks
+	install -d debian/uplinkmgr/etc/uplinkmgr/hooks
 
 # dh_installsystemd handles the uplinkmgr.service unit automatically
 # (picks it up from debian/uplinkmgr.service).

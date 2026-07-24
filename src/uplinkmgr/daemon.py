@@ -15,7 +15,7 @@ from typing import Optional
 from .config import Config, UplinkConfig, load as load_config
 from .state import (IPv6PdState, read_ipv4_state, read_ipv6ra_state,
                     read_ipv6pd_state, read_ipv6na_state, write_atomic)
-from . import monitor, naming, priority, procrun, radvd, routing, state
+from . import hooks, monitor, naming, priority, procrun, radvd, routing, state
 from .statemachine import LinkState, UplinkState, update as sm_update
 
 log = logging.getLogger(__name__)
@@ -37,7 +37,9 @@ class _UplinkRouting:
 
 
 class Daemon:
-    def __init__(self, config_path: str, state_dir: str) -> None:
+    def __init__(self, config_path: str, state_dir: str,
+                 hooks_system_dir: str = hooks.HOOKS_SYSTEM_DIR,
+                 hooks_user_dir: str = hooks.HOOKS_USER_DIR) -> None:
         self._config_path = config_path
         self._state_dir = state_dir
         self._cfg: Optional[Config] = None
@@ -52,6 +54,10 @@ class Daemon:
         self._last_probe: float = float("-inf")  # monotonic; -inf => probe immediately
         self._running = True
         self._executor: Optional[ThreadPoolExecutor] = None
+        self._hooks = hooks.HookRunner(state_dir=state_dir, config_path=config_path,
+                                        system_dir=hooks_system_dir, user_dir=hooks_user_dir)
+        self._primary_ipv4: Optional[str] = None
+        self._primary_ipv6: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -60,6 +66,7 @@ class Daemon:
     def run(self) -> None:
         self._setup_signals()
         self._cfg = load_config(self._config_path)
+        self._hooks.timeout = self._cfg.hook_timeout
         self._init_states()
         self._executor = ThreadPoolExecutor(max_workers=len(self._cfg.uplinks))
         self._write_pid()
@@ -70,6 +77,8 @@ class Daemon:
         self._setup_ipv6_rules()
         self._setup_ipv6_macvlan_rules()
         self._reconcile_all()
+        self._update_primary_uplinks()
+        self._hooks.fire("daemon-start")
         try:
             self._loop()
         finally:
@@ -195,14 +204,17 @@ class Daemon:
             return
         self._teardown_all()
         self._cfg = new_cfg
+        self._hooks.timeout = new_cfg.hook_timeout
         self._init_states()
         self._setup_ipv4_rules()
         self._setup_ipv6_rules()
         self._setup_ipv6_macvlan_rules()
         self._reconcile_all()
+        self._update_primary_uplinks()
         # States were just reset to optimistic UP; re-validate promptly.
         self._last_probe = float("-inf")
         log.info("config reloaded; all uplink states reset to UP")
+        self._hooks.fire("reload")
 
     # ------------------------------------------------------------------
     # SIGUSR1 — reconcile routing, rate-limited radvd SIGHUP
@@ -323,11 +335,13 @@ class Daemon:
             if ipv4_changed:
                 log.info("uplink %s ipv4 -> %s", uplink.name, st.ipv4.value)
                 self._reconcile_uplink_ipv4(uplink)
+                self._fire_wan_event(uplink, "ipv4", st.ipv4)
 
             if ipv6_changed:
                 any_ipv6_change = True
                 log.info("uplink %s ipv6 -> %s", uplink.name, st.ipv6.value)
                 self._reconcile_uplink_ipv6(uplink)
+                self._fire_wan_event(uplink, "ipv6", st.ipv6)
 
         if any_ipv6_change:
             radvd.regenerate_all(
@@ -336,6 +350,60 @@ class Daemon:
                 state_dir=self._state_dir,
                 action="sighup",
             )
+
+        self._update_primary_uplinks()
+
+    def _fire_wan_event(self, uplink: UplinkConfig, family: str, new_state: LinkState) -> None:
+        event = "wan-up" if new_state == LinkState.UP else "wan-down"
+        gateway = address = prefix = prefix_length = None
+        if family == "ipv4":
+            ipv4_st = read_ipv4_state(self._state_dir, uplink.name)
+            if ipv4_st is not None:
+                gateway, address = ipv4_st.gateway, ipv4_st.address
+        else:
+            ra_st = read_ipv6ra_state(self._state_dir, uplink.name)
+            na_st = read_ipv6na_state(self._state_dir, uplink.name)
+            if ra_st is not None:
+                gateway = ra_st.gateway
+                prefix, prefix_length = (ra_st.prefix or None), (ra_st.plen or None)
+            if na_st is not None:
+                address = na_st.address
+        self._hooks.fire(
+            event, uplink=uplink.name,
+            interface=uplink.interface,
+            family=family,
+            uplink_index=uplink.index,
+            metric=uplink.metric,
+            gateway=gateway,
+            address=address,
+            prefix=prefix,
+            prefix_length=prefix_length,
+        )
+
+    def _update_primary_uplinks(self) -> None:
+        cfg = self._cfg
+        up_ipv4 = [u for u in cfg.uplinks if self._states[u.name].ipv4 == LinkState.UP]
+        new_ipv4 = min(up_ipv4, key=lambda u: u.metric) if up_ipv4 else None
+        new_ipv4_name = new_ipv4.name if new_ipv4 is not None else None
+        if new_ipv4_name != self._primary_ipv4:
+            self._fire_primary_change("ipv4", self._primary_ipv4, new_ipv4_name,
+                                       new_ipv4.interface if new_ipv4 is not None else None)
+            self._primary_ipv4 = new_ipv4_name
+
+        new_ipv6 = radvd.primary_ipv6_uplink(cfg, self._states)
+        new_ipv6_name = new_ipv6.name if new_ipv6 is not None else None
+        if new_ipv6_name != self._primary_ipv6:
+            self._fire_primary_change("ipv6", self._primary_ipv6, new_ipv6_name,
+                                       new_ipv6.interface if new_ipv6 is not None else None)
+            self._primary_ipv6 = new_ipv6_name
+
+    def _fire_primary_change(self, family: str, old: Optional[str], new: Optional[str],
+                              interface: Optional[str]) -> None:
+        log.info("primary %s uplink: %s -> %s", family, old or "(none)", new or "(none)")
+        self._hooks.fire(
+            "primary-change", uplink=new or "",
+            family=family, old_primary=old, new_primary=new, interface=interface,
+        )
 
     # ------------------------------------------------------------------
     # Routing reconcile
@@ -638,6 +706,8 @@ class Daemon:
                 state_dir=self._state_dir,
                 action="sighup",
             )
+            self._hooks.fire("daemon-stop")
+        self._hooks.shutdown(timeout=self._hooks.timeout)
 
         pid_path = Path(self._state_dir) / PID_FILE_NAME
         try:

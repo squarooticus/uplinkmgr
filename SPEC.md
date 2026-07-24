@@ -16,6 +16,7 @@
    - 5.1 [uplinkmgr-setup](#51-uplinkmgr-setup)
    - 5.2 [dhcpcd Hook: 50-uplinkmgr](#52-dhcpcd-hook-50-uplinkmgr)
    - 5.3 [uplinkmgr Daemon](#53-uplinkmgr-daemon)
+   - 5.4 [Event Hooks](#54-event-hooks)
 6. [Generated File Formats](#6-generated-file-formats)
    - 6.1 [ifupdown Interface Stanzas](#61-ifupdown-interface-stanzas)
    - 6.2 [dhcpcd Configuration Files](#62-dhcpcd-configuration-files)
@@ -71,6 +72,7 @@ The design goal is to provide the following simultaneously:
 | **SLAAC** | Stateless Address Autoconfiguration — the process by which IPv6 hosts derive addresses from RA-advertised prefixes. |
 | **AdvDefaultPreference** | radvd parameter controlling the preference level (high/medium/low) of the default route announced in RAs. |
 | **Hook** | The dhcpcd exit hook script `/usr/libexec/dhcpcd-hooks/50-uplinkmgr`, invoked by dhcpcd on every lease event. |
+| **Event hook** | An administrator- or system-installed script in `/etc/uplinkmgr/hooks/` or `/usr/libexec/uplinkmgr/hooks/`, run by the uplinkmgr daemon itself on a state-change event (uplink up/down, primary-uplink change, config reload, daemon start/stop). Distinct from the dhcpcd exit hook above — see §5.4. |
 | **uplinkmgr-setup** | The one-shot provisioning tool that generates all configuration files from the YAML config. |
 | **uplinkmgr daemon** | The Python monitoring daemon that tracks uplink health and adjusts the main routing table and radvd configs at runtime. |
 
@@ -188,6 +190,7 @@ uplinkmgr:
   reject_wrong_pd_src: false    # prohibit macvlan traffic whose source is from a different uplink's PD prefix (bool)
   exclusive_preferred_pd: false # withdraw all but the highest-priority UP uplink as a default router (AdvPreferredLifetime 0 + AdvDefaultLifetime 0) (bool)
   radvd_min_restart_interval: 60 # minimum seconds between radvd restarts on SIGUSR1 (integer, default: 60)
+  hook_timeout: 10               # max seconds an event hook script may run before being killed (integer, default: 10)
 
   monitor:
     interval: 10                # seconds between probe cycles (integer, default: 10)
@@ -229,6 +232,7 @@ uplinkmgr:
 - `uplink.ipv6_pd_hint`: Must be in the range 1–64.
 - `uplink.ia_na`: When true, the generated dhcpcd config requests an IA_NA (a non-temporary DHCPv6 address on the WAN interface) in addition to any PD; the hook records it in `ipv6na.state` (§5.3.3) and the daemon uses it for the IPv6 `lo_to_uplink` rule and as the IPv6 probe's source-address bind (§10.3). IPv6 monitoring runs when `ipv6_pd` **or** `ia_na` is true.
 - `ipv6_pd: false` uplinks: No macvlan interfaces are created for these uplinks; no radvd config is generated and no radvd instance is enabled; no IPv6 monitoring is performed unless `ia_na` is true.
+- `hook_timeout`: Must be a positive integer (default: 10). Governs how long any single event hook script (§5.4) may run before being killed; does not affect the dhcpcd exit hook.
 
 ### 4.4 Minimal Working Example
 
@@ -690,13 +694,116 @@ On startup, the daemon:
 6. Installs the global IPv4 policy rules (`lookup main suppress_prefixlength 0` and `lookup uplinkmgr`) and the global IPv6 policy rule (`ip -6 rule add lookup main suppress_prefixlength 0`).
 7. Installs the per-macvlan `ipv6_fwd_to_uplink` rule for every `(uplink, network)` pair, unconditionally, with no `from` constraint yet (PD state isn't known at this point in the general case). These rules are static for the rest of the daemon's lifetime — see §7.5.
 8. Performs an initial reconcile pass over all state files: installs IPv4 and IPv6 routes and the remaining ip -6 rules (`lo_to_uplink`, optionally `reject_wrong_pd_src`) that correspond to existing state files, and narrows step 7's `fwd_to_uplink` rules' `from` constraint where PD state is already present.
-9. Begins the monitoring loop immediately (no delay).
+9. Determines the initial primary uplink for each address family and fires the `daemon-start` event hook (§5.4), then begins the monitoring loop immediately (no delay).
 
 The rationale for optimistic start: at boot, dhcpcd has been running and has configured routes before the daemon starts (see §12). The daemon should not deprovision anything until it has actually observed failures.
 
 The initial reconcile ensures that the daemon's in-memory tracking of installed routes and rules is accurate from startup, so subsequent SIGUSR1 and health-change events only apply the necessary delta.
 
 **Why step 5 is needed:** dhcpcd's hook events are edge-triggered — if a `ROUTERADVERT` or `BOUND6` event fires while uplinkmgr isn't running (e.g. it crashed, was restarted, or dhcpcd simply started first at boot), the corresponding `/run/uplinkmgr/*.state` file is still written correctly (the hook writes state before it signals the daemon), but the `SIGUSR1` notification is lost, and dhcpcd won't re-emit that event just because uplinkmgr later starts — it only fires again when something actually changes (a new RA, a rebind). Without step 5, the daemon's step 8 reconcile pass only picks up whatever was *already* written to disk by the time it runs; anything dhcpcd hasn't gotten around to yet, or already reported while uplinkmgr was down and hasn't had a reason to report again, stays missing until an unrelated future dhcpcd event happens to occur. `dhcpcd -g` closes this gap by forcing an immediate replay of hooks for dhcpcd's *current* state, once the daemon is ready to receive the resulting signals (steps 3 and 5 are ordered so the PID file and signal handlers are already in place before the replay's hook invocations can call `_signal_daemon()`).
+
+---
+
+### 5.4 Event Hooks
+
+Event hooks are administrator- or system-installed scripts, run by the daemon itself on
+state changes that only the daemon can observe — post-hysteresis reachability verdicts,
+which uplink currently holds top priority, config reloads, and the daemon's own lifecycle.
+They are distinct from the dhcpcd exit hook (§5.2, the **Hook**): that hook reacts to raw
+DHCP/RA events; event hooks react to what uplinkmgr itself has decided about them. Modeled
+on NetworkManager's `dispatcher.d` mechanism (individually exec'd scripts, no shell, a
+fixed environment) rather than dhcpcd's own hook chain (sourced into a shared shell) —
+natural given the daemon is Python, not shell.
+
+#### 5.4.1 Directory Layout and Ordering
+
+```
+/usr/libexec/uplinkmgr/hooks/   # system/vendor-installed scripts (package-managed)
+/etc/uplinkmgr/hooks/           # administrator-installed scripts
+```
+
+Both directories are flat (no per-event subdirectories). For each event, scripts from both
+directories are **aggregated into a single run list and sorted by filename in lexical
+(C-locale) order** — e.g. `/etc/uplinkmgr/hooks/10-myhook` runs before
+`/usr/libexec/uplinkmgr/hooks/50-systemhook`.
+
+An `/etc/uplinkmgr/hooks/` entry **shadows** any `/usr/libexec/uplinkmgr/hooks/` entry
+sharing the same **stem** — the filename with a leading `[0-9]+-` prefix stripped once, if
+present (e.g. `50-myhook` → `myhook`; `007-cleanup.sh` → `cleanup.sh`). This lets an
+administrator override a system hook's content, its position in the run order, or both, by
+dropping a same-stem replacement in `/etc/uplinkmgr/hooks/`. Resolution:
+
+1. List raw entries in `/etc/uplinkmgr/hooks/`, excluding dotfiles and known backup
+   patterns (`~`, `.bak`, `.dpkg-*`, `.rpmsave`, `.swp`) — these are never candidates, even
+   for shadowing. Compute the set of stems present.
+2. List raw entries in `/usr/libexec/uplinkmgr/hooks/` (same exclusions), dropping any whose
+   stem is in the `/etc` stem set. **Fail closed:** the system entry is suppressed
+   unconditionally, even if the shadowing `/etc` entry doesn't itself pass the eligibility
+   checks below and therefore never runs — this doubles as a way to deliberately disable a
+   system hook by dropping a non-executable same-stem placeholder in `/etc`.
+3. Union the survivors and sort by filename. (No two survivors can share a filename:
+   identical filenames imply identical stems, already resolved to one survivor in step 2.)
+4. For each survivor, in order, run it iff it is a regular file (or a symlink to one), has
+   at least one executable bit set, and is **not** group- or other-writable and **not**
+   setuid/setgid — the same requirements NetworkManager's dispatcher imposes on its own
+   scripts. A survivor failing this check is skipped (logged at DEBUG) with no fallback.
+
+A non-executable `.sample` placeholder may therefore ship in `/usr/libexec/uplinkmgr/hooks/`
+purely as documentation: it fails the executable check and never runs, and is never
+shadowed by anything since nothing in `/etc` shares its stem by default.
+
+#### 5.4.2 Execution Model
+
+Each eligible script is run individually (`execve`, no shell — env/argv content, including
+gateway addresses and file paths, can't trigger shell injection). Hook scripts run as
+**root**, with the daemon's full privilege — the same trust model as cron, the dhcpcd exit
+hook, and NetworkManager dispatcher scripts (§16.4).
+
+Hook execution for one event is serialized onto a single dedicated background thread inside
+the daemon process: `HookRunner.fire()` enqueues and returns immediately, so a slow or hung
+script never delays probing, route reconciliation, or radvd regeneration. Queued events run
+one at a time, in FIFO order. Each script is subject to a configurable timeout
+(`hook_timeout`, default 10s; see §4.2); on timeout the script's entire process group is
+killed (`SIGKILL`) so descendants it may have spawned don't survive it. A non-zero exit or a
+timeout is logged at WARNING and does not stop the remaining scripts for that event, nor any
+other daemon activity.
+
+On daemon shutdown, the background thread is given up to `hook_timeout` seconds to drain
+its queue (so a `daemon-stop` hook actually gets to run) before the process exits.
+
+#### 5.4.3 Data Passed to Every Hook
+
+`argv = [event, uplink]` — two positional arguments always present; `uplink` is the empty
+string when not applicable (`reload`, `daemon-start`, `daemon-stop`).
+
+Environment set for every invocation:
+
+| Variable | Value |
+|---|---|
+| `UPLINKMGR_EVENT` | `wan-up` \| `wan-down` \| `primary-change` \| `reload` \| `daemon-start` \| `daemon-stop` |
+| `UPLINKMGR_TIMESTAMP` | ISO 8601 timestamp of the event |
+| `UPLINKMGR_STATE_DIR` | The daemon's state directory (`/run/uplinkmgr` by default) |
+| `UPLINKMGR_CONFIG_PATH` | Path to the active config file |
+| `UPLINKMGR_UPLINK` | Set to `argv[2]` whenever it's non-empty |
+| `PATH` | `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` |
+
+No other variable from the daemon's own process environment is inherited — the environment
+passed to a hook script is built from scratch, the same hygiene dhcpcd applies to its own
+hooks.
+
+#### 5.4.4 Events
+
+| Event | Fires when | Additional environment |
+|---|---|---|
+| `wan-up` / `wan-down` | An uplink's IPv4 or IPv6 reachability, per `statemachine.update()` (§10.1), transitions after hysteresis. Fired once per `(uplink, family)` transition, immediately after the corresponding routing reconcile has applied. | `UPLINKMGR_INTERFACE`, `UPLINKMGR_FAMILY` (`ipv4`/`ipv6`), `UPLINKMGR_UPLINK_INDEX`, `UPLINKMGR_METRIC`, `UPLINKMGR_GATEWAY`, `UPLINKMGR_ADDRESS`, and for `ipv6` `UPLINKMGR_PREFIX`/`UPLINKMGR_PREFIX_LENGTH` when known |
+| `primary-change` | The highest-priority UP uplink for a given address family changes — IPv4: lowest-metric UP uplink; IPv6: the uplink radvd would assign `AdvDefaultPreference high` (§11.5). Not tracked anywhere else in the daemon; computed solely to drive this event. Either side may be empty, meaning "no uplink up." | `UPLINKMGR_FAMILY`, `UPLINKMGR_OLD_PRIMARY`, `UPLINKMGR_NEW_PRIMARY`, `UPLINKMGR_INTERFACE` (new primary's, if any) |
+| `reload` | The daemon finishes reloading config on `SIGHUP` (§13.5), after routes/rules/radvd configs are reconciled against the new topology. | none beyond the common set |
+| `daemon-start` | The daemon has completed its initial reconcile pass and is about to enter the monitoring loop (§5.3.8 step 9). | none beyond the common set |
+| `daemon-stop` | The daemon has finished tearing down routes/rules and regenerating radvd configs for shutdown (§13.3), just before removing its PID file. | none beyond the common set |
+
+Deliberately **not** reinvented here: DHCP lease events and raw RA receipt (already the
+dhcpcd exit hook's job, §5.2) and physical link up/down (ifupdown's job) — none of those
+require uplinkmgr's own probing or state machine to detect.
 
 ---
 
@@ -1334,6 +1441,7 @@ Probes for different uplinks run **in parallel** using a `ThreadPoolExecutor` (o
    ip route del default dev <wan-iface> table uplinkmgr
    ```
 3. Log the event: `uplink <name> IPv4 DOWN after <N> consecutive failures`.
+4. Fire the `wan-down` event hook (§5.4) for this uplink, family `ipv4`.
 
 ### 11.2 IPv4 Reprovisioning (DOWN → UP)
 
@@ -1344,6 +1452,7 @@ Probes for different uplinks run **in parallel** using a `ThreadPoolExecutor` (o
    ip route replace default via <GW4> dev <wan-iface> metric <metric> table uplinkmgr
    ```
 3. Log the event: `uplink <name> IPv4 UP after <N> consecutive successes`.
+4. Fire the `wan-up` event hook (§5.4) for this uplink, family `ipv4`.
 
 ### 11.3 IPv6 Deprovisioning (UP → DOWN)
 
@@ -1376,6 +1485,8 @@ Probes for different uplinks run **in parallel** using a `ThreadPoolExecutor` (o
 
 5. Log the event: `uplink <name> IPv6 DOWN`.
 
+6. Fire the `wan-down` event hook (§5.4) for this uplink, family `ipv6`.
+
 **Note:** the `ipv6_fwd_to_uplink` rule is untouched by this transition — it's static for the daemon's lifetime (§7.5) and reacts to neither health-DOWN nor PD-state loss. Health-DOWN alone doesn't remove the per-uplink table's IPv6 default route either — that route is driven purely by `ipv6ra.state` presence (`_reconcile_uplink_ipv6`), independent of probe-based health. What actually stops clients from generating traffic toward a DOWN uplink is step 1 above: radvd's `AdvDefaultLifetime 0`/`AdvPreferredLifetime 0`/`AdvValidLifetime 0` tell clients to stop using this router and abandon its addresses. `ipv6_fwd_to_uplink` merely says "packets arriving on this macvlan consult this table" — harmless to leave in place, since it depends on the table actually containing a route (itself gated on live upstream RA/PD, not on daemon-observed health) to have any effect.
 
 ### 11.4 IPv6 Reprovisioning (DOWN → UP)
@@ -1385,6 +1496,8 @@ Probes for different uplinks run **in parallel** using a `ThreadPoolExecutor` (o
 2. Write configs atomically and SIGHUP all IPv6 radvd instances (preference change only; radvd's live counters are unaffected).
 
 3. Log the event: `uplink <name> IPv6 UP`.
+
+4. Fire the `wan-up` event hook (§5.4) for this uplink, family `ipv6`.
 
 ### 11.5 radvd Config Regeneration Algorithm
 
@@ -1536,12 +1649,15 @@ When the daemon receives SIGTERM (or is stopped by `systemctl stop uplinkmgr`):
    ```
    for each IPv6 uplink.
 
-4. **Remove the PID file:**
+4. **Fire the `daemon-stop` event hook** (§5.4), then wait up to `hook_timeout` seconds for
+   any already-queued event hooks to finish running.
+
+5. **Remove the PID file:**
    ```sh
    rm -f /run/uplinkmgr/uplinkmgr.pid
    ```
 
-5. Exit 0.
+6. Exit 0.
 
 **Rationale:** On daemon stop, all uplinkmgr-specific policy routing rules are removed. Traffic then falls through to the kernel's default `lookup main` rule and uses dhcpcd's main-table routes (with the configured metrics), providing full connectivity without the daemon. radvd configs are left in the optimistic state so advertisements continue correctly. This allows the administrator to stop the daemon for maintenance without disrupting connectivity.
 
@@ -1556,7 +1672,7 @@ When the daemon receives SIGTERM (or is stopped by `systemctl stop uplinkmgr`):
 
 ### 13.5 SIGHUP Handling (Daemon)
 
-If the daemon itself receives SIGHUP, it reloads the config file and resets all state to UP. This is useful for applying config changes without a full restart.
+If the daemon itself receives SIGHUP, it reloads the config file and resets all state to UP. This is useful for applying config changes without a full restart. Once routes/rules/radvd configs are reconciled against the new config and the primary uplink for each family is redetermined, the daemon fires the `reload` event hook (§5.4).
 
 ---
 
@@ -1588,6 +1704,9 @@ Depends: ${python3:Depends}, ${misc:Depends}, python3-yaml, dhcpcd, radvd, iprou
 | systemd service | `/lib/systemd/system/uplinkmgr.service` |
 | radvd template unit | `/usr/lib/systemd/system/radvd-uplinkmgr@.service` |
 | Example config | `/usr/share/doc/uplinkmgr/uplinkmgr.yaml.example` |
+| System event hooks (empty dir) | `/usr/libexec/uplinkmgr/hooks/` |
+| Admin event hooks (empty dir) | `/etc/uplinkmgr/hooks/` |
+| Example event hook (doc only, non-executable) | `/usr/share/doc/uplinkmgr/examples/hooks/00-example.sample` |
 
 Generated files (written by `uplinkmgr-setup`, not by the package directly) are listed in §5.1.3.
 
@@ -1783,6 +1902,7 @@ However:
 - The dhcpcd hook script runs as root (dhcpcd runs as root). The env files in `/etc/uplinkmgr/uplinks/` must be readable only by root (`chmod 600`) since they could be used to influence hook behavior.
 - `/run/uplinkmgr/` contains gateway IP addresses (state files). These are not sensitive but should be owned by root.
 - uplinkmgr does not configure any firewall rules. The administrator is responsible for NAT and inbound filtering.
+- Event hooks (§5.4) run as root, with the daemon's full privilege — the same trust model as cron, the dhcpcd exit hook above, and NetworkManager dispatcher scripts. `/etc/uplinkmgr/hooks/` and `/usr/libexec/uplinkmgr/hooks/` are root-owned directories; only an administrator who already has root (or a trusted package) can place a script there. The daemon additionally refuses to run any candidate script that is group- or other-writable or setuid/setgid, but this is defense in depth, not a substitute for directory permissions — anyone who can write into either directory can already execute arbitrary code as root.
 
 ---
 

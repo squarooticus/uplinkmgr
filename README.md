@@ -321,6 +321,24 @@ With default settings, failover takes 30 seconds (3 × 10s interval) in the
 worst case. Adjust `interval` and `failure_threshold` to trade off detection
 latency against sensitivity to transient packet loss.
 
+### Event hooks
+
+The daemon runs administrator- or system-installed scripts on state changes
+it alone can observe: an uplink's reachability flipping (`wan-up`/`wan-down`),
+which uplink now holds top priority (`primary-change`), a config reload
+(`reload`), and its own startup/shutdown (`daemon-start`/`daemon-stop`).
+This is distinct from the dhcpcd exit hook, which reacts to raw lease/RA
+events rather than uplinkmgr's own probing/state machine.
+
+Drop an executable script into `/etc/uplinkmgr/hooks/` (or
+`/usr/libexec/uplinkmgr/hooks/` for system/vendor scripts); it's run with
+`argv = [event, uplink]` and a handful of `UPLINKMGR_*` environment
+variables. Scripts from both directories are aggregated and run in
+lexicographic filename order, with an `/etc` script shadowing a
+same-numeric-stem `/usr/libexec` script so you can override or disable a
+system hook. See SPEC.md §5.4 for the full directory/ordering rules, the
+event list, and the environment variables each event sets.
+
 ### Diagnostics
 
 The daemon takes a few flags (the packaged unit passes `--log-clean`, which
@@ -363,6 +381,10 @@ uplinkmgr:
 
   # Minimum seconds between radvd restarts (lifetime refresh rate limit).
   radvd_min_restart_interval: 60 # default
+
+  # Max seconds any single event hook script (see "Event hooks" below) may
+  # run before being killed.
+  hook_timeout: 10               # default
 
   monitor:
     interval: 10                 # probe cycle period in seconds
