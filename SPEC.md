@@ -628,7 +628,7 @@ The suppress rules cause traffic to route via connected/local routes in the main
 **Per-uplink IPv4 `lo_to_uplink` rules** (reconciled from `ipv4.state`):
 ```sh
 ip rule add from <wan_ip> iif lo lookup <per_uplink_table> priority <ipv4_lo_to_uplink_priority>
-ip route replace default via <GW4> dev <wan_iface> metric 0 table <per_uplink_table>
+ip route replace default via <GW4> dev <wan_iface> onlink metric 0 table <per_uplink_table>
 ```
 The per-uplink table default route (metric 0, present whenever the shared-table route is present) is what the lo_to_uplink rule resolves to. This ensures router-originated traffic bound to a specific WAN IP exits via the correct uplink rather than the highest-metric uplink.
 
@@ -639,10 +639,12 @@ The desired IPv4 gateway for an uplink is:
 - `None` (no route) if the state file is absent or the uplink is DOWN
 
 When the desired gateway differs from the installed state:
-- If desired is non-None: `ip route replace default via <GW4> dev <wan-iface> metric <metric> table uplinkmgr`
+- If desired is non-None: `ip route replace default via <GW4> dev <wan-iface> onlink metric <metric> table uplinkmgr`
 - If desired is None and a route was installed: `ip route del default dev <wan-iface> table uplinkmgr`
 
 `ip route replace` is atomic (kernel-level replace); the daemon uses it unconditionally when a route should be present, avoiding any transitional state. Route deletions log a warning if the command fails (may already be absent).
+
+The `onlink` flag is required because the daemon's route install (triggered by the dhcpcd hook's `SIGUSR1`) races dhcpcd's own installation of the interface's connected/`scope link` route for the gateway's subnet — without `onlink`, the kernel rejects the gateway as an invalid nexthop if that connected route hasn't landed yet. `onlink` tells the kernel to trust the gateway as on-link via `<wan-iface>` without requiring a matching connected route, removing the ordering dependency entirely.
 
 **Why a separate table (not main):** dhcpcd also writes default routes to the main table with the configured metric. Those routes serve as boot-time fallback and remain managed by dhcpcd. The daemon writes to the separate uplinkmgr table to avoid conflicting with dhcpcd's routes.
 
@@ -1481,7 +1483,7 @@ Probes for different uplinks run **in parallel** using a `ThreadPoolExecutor` (o
    - If the state file does not exist (dhcpcd has not yet obtained a lease), log a warning and skip. The daemon will install the route on the next SIGUSR1 from the hook when the lease arrives.
 2. Install the IPv4 default route in the uplinkmgr table:
    ```sh
-   ip route replace default via <GW4> dev <wan-iface> metric <metric> table uplinkmgr
+   ip route replace default via <GW4> dev <wan-iface> onlink metric <metric> table uplinkmgr
    ```
 3. Log the event: `uplink <name> IPv4 UP after <N> consecutive successes`.
 4. Fire the `wan-up` event hook (§5.4) for this uplink, family `ipv4`.

@@ -46,7 +46,7 @@ def del_ipv6_policy_rule(internal_traffic_priority: int) -> None:
 
 def replace_ipv4_route(gateway: str, iface: str, metric: int, table: int) -> None:
     _run(["ip", "route", "replace", "default",
-          "via", gateway, "dev", iface, "metric", str(metric),
+          "via", gateway, "dev", iface, "onlink", "metric", str(metric),
           "table", str(table)])
 
 

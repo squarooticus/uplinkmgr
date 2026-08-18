@@ -31,7 +31,7 @@ def test_replace_ipv4_route():
         routing.replace_ipv4_route("192.168.1.1", "eth0", 100, 160)
     assert _cmd(m) == [
         "ip", "route", "replace", "default",
-        "via", "192.168.1.1", "dev", "eth0",
+        "via", "192.168.1.1", "dev", "eth0", "onlink",
         "metric", "100", "table", "160",
     ]
 
