@@ -848,7 +848,7 @@ One `iface` stanza per macvlan interface (one per (uplink, internal-interface) p
 
 auto vlan10-u0
 iface vlan10-u0 inet manual
-    pre-up ip link add link vlan10 name vlan10-u0 type macvlan mode bridge
+    pre-up ip link add link vlan10 name vlan10-u0 type macvlan mode private
     pre-up ip link set vlan10-u0 address 52:00:00:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan10-u0.addr_gen_mode=1
     up ip link set vlan10-u0 up
@@ -858,7 +858,7 @@ iface vlan10-u0 inet manual
 
 auto vlan20-u0
 iface vlan20-u0 inet manual
-    pre-up ip link add link vlan20 name vlan20-u0 type macvlan mode bridge
+    pre-up ip link add link vlan20 name vlan20-u0 type macvlan mode private
     pre-up ip link set vlan20-u0 address 52:00:01:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan20-u0.addr_gen_mode=1
     up ip link set vlan20-u0 up
@@ -868,7 +868,7 @@ iface vlan20-u0 inet manual
 
 auto vlan10-u1
 iface vlan10-u1 inet manual
-    pre-up ip link add link vlan10 name vlan10-u1 type macvlan mode bridge
+    pre-up ip link add link vlan10 name vlan10-u1 type macvlan mode private
     pre-up ip link set vlan10-u1 address 52:01:00:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan10-u1.addr_gen_mode=1
     up ip link set vlan10-u1 up
@@ -878,7 +878,7 @@ iface vlan10-u1 inet manual
 
 auto vlan20-u1
 iface vlan20-u1 inet manual
-    pre-up ip link add link vlan20 name vlan20-u1 type macvlan mode bridge
+    pre-up ip link add link vlan20 name vlan20-u1 type macvlan mode private
     pre-up ip link set vlan20-u1 address 52:01:01:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan20-u1.addr_gen_mode=1
     up ip link set vlan20-u1 up
@@ -892,7 +892,7 @@ iface vlan20-u1 inet manual
 - `addr_gen_mode=1` disables EUI-64 automatic link-local generation so the explicit `fe80::1:<N>` can be assigned without conflict.
 - The `pre-up` stanzas run before the interface is brought up; `up` stanzas run after; `down` stanzas run when the interface is taken down.
 - Error suppression (`2>/dev/null || true`) on `down` stanzas is intentional: these commands are best-effort cleanup.
-- The `macvlan mode bridge` allows the macvlan interface to receive multicast/broadcast from the parent interface, which is necessary for SLAAC (multicast solicited-node addresses) to work.
+- `macvlan mode private` prevents the macvlan sibling interfaces from communicating with each other directly (they never need to — each only talks to its parent LAN and its own uplink's routing table), while still receiving broadcast/multicast from the parent interface for SLAAC/ND, since that reception path is unaffected by macvlan mode.
 
 ### 6.2 dhcpcd Configuration File
 

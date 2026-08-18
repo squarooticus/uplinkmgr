@@ -26,7 +26,7 @@ def interfaces_file(cfg: Config) -> str:
             mac = naming.mac_address(uplink.index, net_idx)
             lines.append(f"auto {mv}")
             lines.append(f"iface {mv} inet manual")
-            lines.append(f"    pre-up ip link add link {net.interface} name {mv} type macvlan mode bridge")
+            lines.append(f"    pre-up ip link add link {net.interface} name {mv} type macvlan mode private")
             lines.append(f"    pre-up ip link set {mv} address {mac}")
             lines.append(f"    pre-up sysctl -q net.ipv6.conf.{mv}.addr_gen_mode=1")
             lines.append(f"    up ip link set {mv} up")
