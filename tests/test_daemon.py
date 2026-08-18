@@ -555,6 +555,48 @@ class TestReconcileIPv6PdLoToUplink:
 
 
 # ---------------------------------------------------------------------------
+# Primary-change hook
+# ---------------------------------------------------------------------------
+
+class TestUpdatePrimaryUplinks:
+    def test_primary_change_fires_hook_with_both_interfaces(self, tmp_path):
+        cfg = make_config(uplinks=[
+            make_uplink("isp1", "eth0", index=0, metric=100),
+            make_uplink("isp2", "eth3", index=1, metric=200),
+        ])
+        d = _make_daemon(cfg, tmp_path)
+        d._states["isp1"].ipv4 = LinkState.UP
+        d._states["isp2"].ipv4 = LinkState.UP
+        d._primary_ipv4 = "isp2"  # simulate isp2 was previously primary
+
+        with patch.object(d._hooks, "fire") as fire:
+            d._update_primary_uplinks()
+
+        fire.assert_any_call(
+            "primary-change", uplink="isp1",
+            family="ipv4", old_primary="isp2", new_primary="isp1",
+            interface="eth0",
+            old_primary_iface="eth3", new_primary_iface="eth0",
+        )
+        assert d._primary_ipv4 == "isp1"
+
+    def test_primary_change_from_none_omits_old_interface(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp1", "eth0", index=0, metric=100)])
+        d = _make_daemon(cfg, tmp_path)
+        d._states["isp1"].ipv4 = LinkState.UP
+
+        with patch.object(d._hooks, "fire") as fire:
+            d._update_primary_uplinks()
+
+        fire.assert_any_call(
+            "primary-change", uplink="isp1",
+            family="ipv4", old_primary=None, new_primary="isp1",
+            interface="eth0",
+            old_primary_iface=None, new_primary_iface="eth0",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Teardown
 # ---------------------------------------------------------------------------
 

@@ -387,23 +387,33 @@ class Daemon:
         new_ipv4 = min(up_ipv4, key=lambda u: u.metric) if up_ipv4 else None
         new_ipv4_name = new_ipv4.name if new_ipv4 is not None else None
         if new_ipv4_name != self._primary_ipv4:
-            self._fire_primary_change("ipv4", self._primary_ipv4, new_ipv4_name,
-                                       new_ipv4.interface if new_ipv4 is not None else None)
+            old_ipv4_iface = next(
+                (u.interface for u in cfg.uplinks if u.name == self._primary_ipv4), None)
+            self._fire_primary_change(
+                "ipv4", self._primary_ipv4, new_ipv4_name, old_ipv4_iface,
+                new_ipv4.interface if new_ipv4 is not None else None,
+            )
             self._primary_ipv4 = new_ipv4_name
 
         new_ipv6 = radvd.primary_ipv6_uplink(cfg, self._states)
         new_ipv6_name = new_ipv6.name if new_ipv6 is not None else None
         if new_ipv6_name != self._primary_ipv6:
-            self._fire_primary_change("ipv6", self._primary_ipv6, new_ipv6_name,
-                                       new_ipv6.interface if new_ipv6 is not None else None)
+            old_ipv6_iface = next(
+                (u.interface for u in cfg.uplinks if u.name == self._primary_ipv6), None)
+            self._fire_primary_change(
+                "ipv6", self._primary_ipv6, new_ipv6_name, old_ipv6_iface,
+                new_ipv6.interface if new_ipv6 is not None else None,
+            )
             self._primary_ipv6 = new_ipv6_name
 
     def _fire_primary_change(self, family: str, old: Optional[str], new: Optional[str],
-                              interface: Optional[str]) -> None:
+                              old_interface: Optional[str], new_interface: Optional[str]) -> None:
         log.info("primary %s uplink: %s -> %s", family, old or "(none)", new or "(none)")
         self._hooks.fire(
             "primary-change", uplink=new or "",
-            family=family, old_primary=old, new_primary=new, interface=interface,
+            family=family, old_primary=old, new_primary=new,
+            interface=new_interface,
+            old_primary_iface=old_interface, new_primary_iface=new_interface,
         )
 
     # ------------------------------------------------------------------
