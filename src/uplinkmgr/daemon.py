@@ -236,6 +236,7 @@ class Daemon:
     def _do_reconcile(self) -> None:
         self._reconcile_requested = False
         self._reconcile_all()
+        self._update_primary_uplinks()
 
         min_interval = self._cfg.radvd_min_restart_interval
         now_mono = time.monotonic()
@@ -381,6 +382,18 @@ class Daemon:
             prefix_length=prefix_length,
         )
 
+    def _force_link_down(self, uplink: UplinkConfig, family: str) -> None:
+        """Immediately mark family DOWN for uplink, bypassing probe hysteresis --
+        used when dhcpcd itself reports the lease is gone (STOP/RELEASE/EXPIRE),
+        a definitive signal safe to act on without confirmation. Recovery still
+        goes through the normal probe-based hysteresis (no fast-path for UP)."""
+        st = self._states[uplink.name]
+        setattr(st, family, LinkState.DOWN)
+        setattr(st, f"{family}_consecutive_failures", 0)
+        setattr(st, f"{family}_consecutive_successes", 0)
+        log.info("uplink %s %s -> down (dhcpcd lease gone)", uplink.name, family)
+        self._fire_wan_event(uplink, family, LinkState.DOWN)
+
     def _update_primary_uplinks(self) -> None:
         cfg = self._cfg
         up_ipv4 = [u for u in cfg.uplinks if self._states[u.name].ipv4 == LinkState.UP]
@@ -467,6 +480,9 @@ class Daemon:
         per_uplink_tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
 
         ipv4_st = read_ipv4_state(self._state_dir, uplink.name)
+        if ipv4_st is None and health.ipv4 == LinkState.UP:
+            self._force_link_down(uplink, "ipv4")
+
         uplink_gw = (
             ipv4_st.gateway
             if ipv4_st is not None and health.ipv4 == LinkState.UP
@@ -509,10 +525,17 @@ class Daemon:
         cfg = self._cfg
         now = int(time.time())
         installed = self._installed[uplink.name]
+        health = self._states[uplink.name]
         tbl = naming.ipv6_table_num(cfg.routing_table_start, uplink.index)
         ra_st = read_ipv6ra_state(self._state_dir, uplink.name)
         pd_st = read_ipv6pd_state(self._state_dir, uplink.name)
         na_st = read_ipv6na_state(self._state_dir, uplink.name)
+
+        # STOP6/EXPIRE6 remove all three IPv6 state files at once (see
+        # hooks/dhcpcd-hook) -- keying on ra_st alone would misfire for
+        # PD/IA_NA-only uplinks that never populate ra_st in the first place.
+        if ra_st is None and pd_st is None and na_st is None and health.ipv6 == LinkState.UP:
+            self._force_link_down(uplink, "ipv6")
 
         # IPv6 default route: always replace to refresh expiry
         if ra_st is not None:
@@ -526,7 +549,6 @@ class Daemon:
             installed.ipv6_route_installed = False
 
         # lo_to_uplink rule: present iff an uplink prefix/address is known AND health is UP
-        health = self._states[uplink.name]
         if health.ipv6 != LinkState.UP:
             uplink_prefix = None
         elif na_st is not None:

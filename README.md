@@ -327,6 +327,15 @@ With default settings, failover takes 30 seconds (3 × 10s interval) in the
 worst case. Adjust `interval` and `failure_threshold` to trade off detection
 latency against sensitivity to transient packet loss.
 
+This probe-based hysteresis is bypassed for a faster path: when dhcpcd
+itself reports an uplink's lease is gone (`EXPIRE`/`RELEASE`/`STOP` for
+IPv4, `EXPIRE6`/`STOP6` for IPv6 — e.g. from `dhcpcd --release <iface>`, a
+lease expiring, or dhcpcd noticing the interface is unusable), the daemon
+marks that uplink DOWN and re-selects the primary uplink immediately,
+without waiting for `failure_threshold`. Recovery is not fast-pathed — it
+still requires `recovery_threshold` consecutive successful probes, to avoid
+flapping on an unstable reconnect.
+
 ### Event hooks
 
 The daemon runs administrator- or system-installed scripts on state changes

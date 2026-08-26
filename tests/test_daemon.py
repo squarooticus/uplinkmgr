@@ -597,6 +597,140 @@ class TestUpdatePrimaryUplinks:
 
 
 # ---------------------------------------------------------------------------
+# Fast failover on dhcpcd lease-loss (STOP/STOP6/EXPIRE/EXPIRE6/RELEASE)
+# ---------------------------------------------------------------------------
+
+class TestForceLinkDown:
+    def test_ipv4_state_disappearing_forces_down_and_fires_wan_down(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+        d._states["isp"].ipv4_consecutive_failures = 1  # should be reset on forced-down
+
+        with patch("uplinkmgr.daemon.routing"), patch.object(d._hooks, "fire") as fire:
+            d._reconcile_uplink_ipv4(cfg.uplinks[0])
+
+        assert d._states["isp"].ipv4 == LinkState.DOWN
+        assert d._states["isp"].ipv4_consecutive_failures == 0
+        fire.assert_any_call(
+            "wan-down", uplink="isp", interface="eth0", family="ipv4",
+            uplink_index=0, metric=100,
+            gateway=None, address=None, prefix=None, prefix_length=None,
+        )
+
+    def test_ipv4_state_present_does_not_force_down(self, tmp_path):
+        cfg = make_config()
+        write_state(tmp_path, "isp", "ipv4", {"gateway": "10.0.0.1", "address": "10.0.0.5"})
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.routing"), patch.object(d._hooks, "fire") as fire:
+            d._reconcile_uplink_ipv4(cfg.uplinks[0])
+
+        assert d._states["isp"].ipv4 == LinkState.UP
+        fire.assert_not_called()
+
+    def test_ipv4_already_down_does_not_refire(self, tmp_path):
+        cfg = make_config()
+        d = _make_daemon(cfg, tmp_path)
+        d._states["isp"].ipv4 = LinkState.DOWN
+
+        with patch("uplinkmgr.daemon.routing"), patch.object(d._hooks, "fire") as fire:
+            d._reconcile_uplink_ipv4(cfg.uplinks[0])
+
+        fire.assert_not_called()
+
+    def test_ipv6_all_state_absent_forces_down(self, tmp_path):
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)])
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.routing"), patch.object(d._hooks, "fire") as fire:
+            d._reconcile_uplink_ipv6(cfg.uplinks[0])
+
+        assert d._states["isp"].ipv6 == LinkState.DOWN
+        fire.assert_any_call(
+            "wan-down", uplink="isp", interface="eth0", family="ipv6",
+            uplink_index=0, metric=100,
+            gateway=None, address=None, prefix=None, prefix_length=None,
+        )
+
+    def test_ipv6_partial_state_does_not_force_down(self, tmp_path):
+        """PD/IA_NA-only uplinks that never populate ra_st must not be treated
+        as torn down -- only the total absence of all three IPv6 state files
+        (what STOP6/EXPIRE6 actually produces) should force DOWN."""
+        cfg = make_config(uplinks=[make_uplink("isp", "eth0", index=0, ipv6_pd=True)])
+        write_state(tmp_path, "isp", "ipv6pd", {
+            "delegated_prefix": "2001:db8::", "delegated_length": "56",
+            "vltime": "86400", "pltime": "14400", "timestamp": "1000000",
+        })
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.routing"), patch.object(d._hooks, "fire") as fire:
+            d._reconcile_uplink_ipv6(cfg.uplinks[0])
+
+        assert d._states["isp"].ipv6 == LinkState.UP
+        fire.assert_not_called()
+
+    def test_recovery_is_not_fast_pathed(self, tmp_path):
+        """Once forced down, a fresh state file alone must not flip LinkState
+        back to UP -- only _run_cycle()'s probe-based recovery hysteresis can."""
+        cfg = make_config()
+        write_state(tmp_path, "isp", "ipv4", {"gateway": "10.0.0.1", "address": "10.0.0.5"})
+        d = _make_daemon(cfg, tmp_path)
+        d._states["isp"].ipv4 = LinkState.DOWN
+
+        with patch("uplinkmgr.daemon.routing"), patch.object(d._hooks, "fire") as fire:
+            d._reconcile_uplink_ipv4(cfg.uplinks[0])
+
+        assert d._states["isp"].ipv4 == LinkState.DOWN
+        fire.assert_not_called()
+
+
+class TestDoReconcileTriggersFailover:
+    def test_calls_update_primary_uplinks(self, tmp_path):
+        cfg = make_config(uplinks=[
+            make_uplink("isp1", "eth0", index=0, metric=100),
+            make_uplink("isp2", "eth3", index=1, metric=200),
+        ])
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.routing"), patch("uplinkmgr.daemon.radvd"), \
+                patch.object(d, "_update_primary_uplinks") as upu:
+            d._do_reconcile()
+
+        upu.assert_called_once()
+
+    def test_lease_loss_promotes_backup_uplink_without_probe_cycle(self, tmp_path):
+        cfg = make_config(uplinks=[
+            make_uplink("isp1", "eth0", index=0, metric=100),
+            make_uplink("isp2", "eth3", index=1, metric=200),
+        ])
+        write_state(tmp_path, "isp1", "ipv4", {"gateway": "10.0.0.1", "address": "10.0.0.5"})
+        write_state(tmp_path, "isp2", "ipv4", {"gateway": "10.1.0.1", "address": "10.1.0.5"})
+        d = _make_daemon(cfg, tmp_path)
+
+        with patch("uplinkmgr.daemon.routing"), patch("uplinkmgr.daemon.radvd"):
+            d._reconcile_all()
+            d._update_primary_uplinks()
+        assert d._primary_ipv4 == "isp1"
+
+        # isp1's lease is released -- hook deletes its state file and signals
+        # the daemon (SIGUSR1), same as a real STOP/EXPIRE/RELEASE event.
+        (tmp_path / "isp1.ipv4.state").unlink()
+
+        with patch("uplinkmgr.daemon.routing"), patch("uplinkmgr.daemon.radvd"), \
+                patch.object(d._hooks, "fire") as fire:
+            d._do_reconcile()
+
+        assert d._states["isp1"].ipv4 == LinkState.DOWN
+        assert d._primary_ipv4 == "isp2"
+        fire.assert_any_call(
+            "primary-change", uplink="isp2",
+            family="ipv4", old_primary="isp1", new_primary="isp2",
+            interface="eth3",
+            old_primary_iface="eth0", new_primary_iface="eth3",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Teardown
 # ---------------------------------------------------------------------------
 

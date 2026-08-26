@@ -434,6 +434,11 @@ Actions:
    fi
    ```
 
+**Fast failover:** because these events remove the `.ipv4.state` file, the daemon's
+next reconcile (triggered by the `SIGUSR1` above) treats the disappearance as a
+definitive signal and forces the uplink's IPv4 health to `DOWN` immediately,
+bypassing the probe-based hysteresis — see §5.3.4a.
+
 #### 5.2.6 IPv6 ROUTERADVERT (WAN interface)
 
 Triggered when: `$reason` is `ROUTERADVERT` and `$interface` matches the WAN interface.
@@ -539,6 +544,11 @@ Actions:
    ```
 
 **Note:** The hook ignores EXPIRE6/STOP6 events on macvlan interfaces — those fire co-temporally with the WAN EXPIRE6 and carry no additional state. All IPv6 routing cleanup (routes, rules) is performed by the daemon on SIGUSR1.
+
+**Fast failover:** because these events remove all three IPv6 state files at once,
+the daemon's next reconcile (triggered by the `SIGUSR1` above) sees the total
+absence of IPv6 state and forces the uplink's IPv6 health to `DOWN` immediately,
+bypassing the probe-based hysteresis — see §5.3.4a.
 
 #### 5.2.9 RECONFIGURE (WAN interface — `dhcpcd -g` replay)
 
@@ -649,6 +659,52 @@ The `onlink` flag is required because the daemon's route install (triggered by t
 
 **Why a separate table (not main):** dhcpcd also writes default routes to the main table with the configured metric. Those routes serve as boot-time fallback and remain managed by dhcpcd. The daemon writes to the separate uplinkmgr table to avoid conflicting with dhcpcd's routes.
 
+#### 5.3.4a Fast Failover on Lease Loss
+
+Normally an uplink's health only changes via the probe loop's hysteresis
+(§10.1): `failure_threshold` consecutive failed probe cycles, up to
+`failure_threshold × monitor.interval` seconds (30s worst case with
+defaults). But IPv4 `EXPIRE`/`RELEASE`/`STOP` and IPv6 `EXPIRE6`/`STOP6`
+(§5.2.5, §5.2.8) are *deliberate* signals from dhcpcd — a released lease, an
+expired lease, or an administrator running `dhcpcd --release <iface>` — not
+noisy hardware events, so the daemon trusts them immediately instead of
+waiting for probe confirmation:
+
+- On each per-uplink reconcile (`_reconcile_uplink_ipv4`/
+  `_reconcile_uplink_ipv6`, run on every `SIGUSR1`), if the relevant state
+  is now completely absent while the uplink's health for that family was
+  still `UP`, the daemon forces that family to `DOWN` immediately: it
+  updates `UplinkState`, resets the consecutive failure/success counters,
+  logs the transition, and fires `wan-down` (§5.4.4) — bypassing
+  `failure_threshold` entirely.
+  - IPv4's trigger is the absence of `ipv4.state`.
+  - IPv6's trigger is the absence of **all three** of `ipv6ra.state`,
+    `ipv6pd.state`, and `ipv6na.state` — matching exactly what
+    EXPIRE6/STOP6 produce (§5.2.8). A single missing file (e.g. an uplink
+    that uses DHCPv6-PD/IA_NA without ever populating `ipv6ra.state`) does
+    **not** trigger this — only the total absence that a genuine
+    lease-loss event produces does.
+- `_do_reconcile()` (the `SIGUSR1` handler, §5.3.6) calls
+  `_update_primary_uplinks()` after reconciling, so a forced-down
+  transition promotes a backup uplink and fires `primary-change` (§5.4.4)
+  immediately — not just at the end of the next probe cycle. This runs on
+  every `SIGUSR1` (including harmless `BOUND`/`RENEW`/`ROUTERADVERT`
+  events), but `_update_primary_uplinks()` only fires `primary-change` when
+  the selection actually changes, so this adds no extra hook noise in the
+  common case.
+
+**Recovery is not fast-pathed.** Only the `DOWN` direction bypasses
+hysteresis; `UP` still requires `recovery_threshold` consecutive successful
+probes from the normal probe loop, same as any other recovery. A fresh
+`BOUND`/`BOUND6` re-populating the state file does not by itself flip health
+back to `UP` — this avoids primary-uplink flapping if the reconnect itself
+is unstable.
+
+**NOCARRIER is deliberately not handled.** Raw link-layer carrier loss is a
+noisier, less deliberate signal than dhcpcd's own lease-teardown decision
+(flaky hardware can chatter it); carrier loss still surfaces via dhcpcd's
+own eventual `EXPIRE`/`STOP` or via the standard probe-based hysteresis.
+
 #### 5.3.5 radvd Config Regeneration
 
 All radvd config updates use SIGHUP, not `systemctl restart`. This is possible because radvd advertises `min(configured_lifetime, address_lifetime)` for any prefix that has a matching address on the interface. Since dhcpcd sub-delegates a /64 from the PD prefix to each macvlan and keeps that address's preferred/valid lifetimes current, radvd automatically reads the correct remaining lifetimes from the kernel on each RA it sends and on each SIGHUP. The `DecrementLifetimes` internal counter is never needed, so the daemon sets `DecrementLifetimes off` in all generated radvd configs.
@@ -689,6 +745,8 @@ while running:
 ```
 
 The probe and state update for each uplink are independent — an uplink's IPv4 and IPv6 states are tracked and acted on separately. A single uplink can be IPv4-UP + IPv6-DOWN simultaneously.
+
+**"reconcile" in the pending-signal-work step also re-evaluates primary uplinks.** `_do_reconcile()` (the `SIGUSR1` handler) reconciles routes/rules from state *and* calls `_update_primary_uplinks()`, so a fast-path forced-DOWN (§5.3.4a) triggers immediate failover on the same wake-up that applied it, rather than waiting for the next probe cycle's `_update_primary_uplinks()` call.
 
 **Probe timing is independent of signal wake-ups.** Signals wake the loop early so their work (reconcile, radvd SIGHUP, config reload) is applied promptly, but they do **not** reset the probe timer: probe cycles run at most once per `monitor.interval` no matter how frequently signals arrive. This matters for the same reason as the radvd rate limiting in §5.3.5 — ISPs like Spectrum send RAs every 1–2 seconds, each of which becomes a hook `SIGUSR1`; without the decoupled timer, every such signal would restart the probe cycle and the daemon would probe every 1–2 seconds regardless of the configured interval. The one exception is a config reload (SIGHUP), which resets the timer so that the freshly reset (optimistically UP) uplink states are re-validated by an immediate probe cycle.
 
@@ -1479,6 +1537,13 @@ Counter semantics:
 - In `UP` state: `consecutive_failures` increments on each failed probe, resets to 0 on any successful probe.
 - In `DOWN` state: `consecutive_successes` increments on each successful probe, resets to 0 on any failed probe.
 - On state transition, both counters reset to 0.
+
+This state machine governs probe-driven transitions only. A `DOWN` transition can
+also happen outside this diagram, immediately and without waiting for
+`failure_threshold`, when dhcpcd itself reports a lease is gone
+(`EXPIRE`/`RELEASE`/`STOP`/`EXPIRE6`/`STOP6`) — see §5.3.4a. That fast path only
+ever forces `DOWN`; the `UP` transition always goes through `recovery_threshold`
+as shown above.
 
 ### 10.2 IPv4 Probe Detail
 
