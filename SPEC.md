@@ -854,8 +854,8 @@ iface vlan10-u0 inet manual
     pre-up ip link set vlan10-u0 address 52:00:00:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan10-u0.addr_gen_mode=1
     up ip link set vlan10-u0 up
-    up ip -6 addr add fe80::1:1 dev vlan10-u0 scope link
-    down ip -6 addr del fe80::1:1 dev vlan10-u0 scope link 2>/dev/null || true
+    up ip -6 addr add fe80::1:1/64 dev vlan10-u0 scope link
+    down ip -6 addr del fe80::1:1/64 dev vlan10-u0 scope link 2>/dev/null || true
     down ip link del vlan10-u0 2>/dev/null || true
 
 auto vlan20-u0
@@ -864,8 +864,8 @@ iface vlan20-u0 inet manual
     pre-up ip link set vlan20-u0 address 52:00:01:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan20-u0.addr_gen_mode=1
     up ip link set vlan20-u0 up
-    up ip -6 addr add fe80::1:1 dev vlan20-u0 scope link
-    down ip -6 addr del fe80::1:1 dev vlan20-u0 scope link 2>/dev/null || true
+    up ip -6 addr add fe80::1:1/64 dev vlan20-u0 scope link
+    down ip -6 addr del fe80::1:1/64 dev vlan20-u0 scope link 2>/dev/null || true
     down ip link del vlan20-u0 2>/dev/null || true
 
 auto vlan10-u1
@@ -874,8 +874,8 @@ iface vlan10-u1 inet manual
     pre-up ip link set vlan10-u1 address 52:01:00:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan10-u1.addr_gen_mode=1
     up ip link set vlan10-u1 up
-    up ip -6 addr add fe80::1:2 dev vlan10-u1 scope link
-    down ip -6 addr del fe80::1:2 dev vlan10-u1 scope link 2>/dev/null || true
+    up ip -6 addr add fe80::1:2/64 dev vlan10-u1 scope link
+    down ip -6 addr del fe80::1:2/64 dev vlan10-u1 scope link 2>/dev/null || true
     down ip link del vlan10-u1 2>/dev/null || true
 
 auto vlan20-u1
@@ -884,8 +884,8 @@ iface vlan20-u1 inet manual
     pre-up ip link set vlan20-u1 address 52:01:01:00:00:00
     pre-up sysctl -q net.ipv6.conf.vlan20-u1.addr_gen_mode=1
     up ip link set vlan20-u1 up
-    up ip -6 addr add fe80::1:2 dev vlan20-u1 scope link
-    down ip -6 addr del fe80::1:2 dev vlan20-u1 scope link 2>/dev/null || true
+    up ip -6 addr add fe80::1:2/64 dev vlan20-u1 scope link
+    down ip -6 addr del fe80::1:2/64 dev vlan20-u1 scope link 2>/dev/null || true
     down ip link del vlan20-u1 2>/dev/null || true
 ```
 
