@@ -97,7 +97,7 @@ The design goal is to provide the following simultaneously:
 ┌──────────────────────────────────────────────────────────────────┐
 │  Generated files:                                                │
 │   /etc/network/interfaces.d/uplinkmgr.conf        (macvlan stanzas)    │
-│   /etc/dhcpcd.conf                           (single dhcpcd cfg)  │
+│   /etc/uplinkmgr/dhcpcd/dhcpcd.conf          (single dhcpcd cfg)  │
 │   /etc/uplinkmgr/radvd/radvd-uplinkmgr-<name>.conf  (radvd cfg)   │
 │   /etc/iproute2/rt_tables.d/uplinkmgr.conf   (table name→number)  │
 │   /etc/uplinkmgr/uplinks/<name>.env          (shell env fragment) │
@@ -107,7 +107,7 @@ Boot / runtime event flow:
                                                                     
   ifupdown brings up macvlan interfaces                            
        │                                                           
-  dhcpcd.service starts (single instance, all uplink interfaces)          
+  dhcpcd-uplinkmgr.service starts (single instance, all uplink ifaces)   
        │                                                           
   dhcpcd obtains IPv4 lease → invokes exit hook                   
        │  50-uplinkmgr: writes /run/uplinkmgr/<name>.ipv4.state,     
@@ -266,10 +266,11 @@ All other fields take their defaults.
 - Manually when the config file is changed
 
 After generating files, when systemd is running (`/run/systemd/system` exists) and `--dry-run` is not given, it also applies the runtime changes needed to make the new configuration take effect:
-- Enables each configured `radvd-uplinkmgr@<name>.service` instance, then starts it (after dhcpcd is up).
-- Enables and restarts `dhcpcd.service` (a restart, not a reload — dhcpcd does not reload config on SIGHUP).
+- Enables each configured `radvd-uplinkmgr@<name>.service` instance, then starts it (after dhcpcd is up). Also gives `uplinkmgr.service` a formal `Wants=` on it via `systemctl add-wants uplinkmgr.service radvd-uplinkmgr@<name>.service` — `uplinkmgr.service`'s own unit file (§14.4) can't statically list every instance since the set is dynamic, derived from config, so this is done here instead, writing a drop-in symlink under `/etc/systemd/system/uplinkmgr.service.wants/`.
+- Enables and restarts `dhcpcd-uplinkmgr.service` (a restart, not a reload — dhcpcd does not reload config on SIGHUP).
 - Enables and restarts `uplinkmgr.service` (picks up uplink-list or monitoring changes).
-- Stops and disables stale `radvd-uplinkmgr@` instances for uplinks no longer configured (§5.1.4).
+- Stops and disables stale `radvd-uplinkmgr@` instances for uplinks no longer configured, and removes the matching `uplinkmgr.service` `Wants=` drop-in for each (§5.1.4).
+- Runs `systemctl daemon-reload` at the end, so the `add-wants`/drop-in-removal changes above take effect immediately rather than waiting for the next reload.
 
 It never touches nftables — firewall and NAT configuration is left entirely to the administrator. On a non-systemd system these runtime actions are skipped, and the administrator must restart the affected services manually.
 
@@ -291,7 +292,7 @@ For each run, `uplinkmgr-setup` writes or overwrites the following files. Existi
 | File | Notes |
 |------|-------|
 | `/etc/network/interfaces.d/uplinkmgr.conf` | macvlan `iface` stanzas (one per macvlan) |
-| `/etc/dhcpcd.conf` | single dhcpcd config covering all uplinks (previous config backed up to `/etc/dhcpcd.conf.pre-uplinkmgr`) |
+| `/etc/uplinkmgr/dhcpcd/dhcpcd.conf` | single dhcpcd config covering all uplinks, run by uplinkmgr's own `dhcpcd-uplinkmgr.service` (§6.3) |
 | `/etc/uplinkmgr/radvd/radvd-uplinkmgr-<name>.conf` | radvd config (initial/up state), one per IPv6 uplink |
 | `/etc/iproute2/rt_tables.d/uplinkmgr.conf` | routing table name→number mappings |
 | `/etc/uplinkmgr/uplinks/<name>.env` | shell env fragment, one per uplink |
@@ -300,7 +301,7 @@ For each run, `uplinkmgr-setup` writes or overwrites the following files. Existi
 
 When `uplinkmgr-setup` runs, it removes any files from a previous run whose uplink name no longer exists in the current config. It tracks managed files by scanning for filenames matching the uplinkmgr naming patterns (radvd configs under `/etc/uplinkmgr/radvd/`, env files and dangling symlinks under `/etc/uplinkmgr/uplinks/`). This prevents stale configs from persisting after an uplink is removed.
 
-Stale systemd units get the same treatment: under systemd, setup enumerates all `radvd-uplinkmgr@` instances systemd knows about (`systemctl list-units --all`) and stops and disables any whose uplink is no longer in the current config.
+Stale systemd units get the same treatment: under systemd, setup enumerates all `radvd-uplinkmgr@` instances systemd knows about (`systemctl list-units --all`) and stops and disables any whose uplink is no longer in the current config, also removing its `uplinkmgr.service` `Wants=` drop-in symlink (there is no `systemctl remove-wants` verb, so this is done by deleting `/etc/systemd/system/uplinkmgr.service.wants/radvd-uplinkmgr@<name>.service` directly — a no-op if already absent).
 
 #### 5.1.5 Directory Creation
 
@@ -898,7 +899,9 @@ iface vlan20-u1 inet manual
 
 ### 6.2 dhcpcd Configuration File
 
-Written to `/etc/dhcpcd.conf` (a single file for all uplinks). The existing file is backed up to `/etc/dhcpcd.conf.pre-uplinkmgr` before the first write.
+Written to `/etc/uplinkmgr/dhcpcd/dhcpcd.conf` (a single file for all uplinks), read by uplinkmgr's own `dhcpcd-uplinkmgr.service` (§6.3) rather than the system's default dhcpcd config path.
+
+**Admin fragments:** If present, `/etc/uplinkmgr/dhcpcd/dhcpcd.conf.head` and `/etc/uplinkmgr/dhcpcd/dhcpcd.conf.tail` are spliced around the generated body — `head` immediately after the header comment, `tail` at the very end of the file. Both are optional; a missing file contributes nothing. This is the supported way to add global dhcpcd options (`head`) or extra `interface` stanzas (`tail`) that `uplinkmgr-setup` itself has no config knob for, without hand-editing the generated file (which is overwritten on every run).
 
 Example for two uplinks — `comcast` on `eth0` (`ipv6_pd: true`, `ia_na: true`, macvlans `vlan10-u0`/`vlan20-u0`) and `starlink` on `eth1` (IPv4-only):
 
@@ -942,7 +945,57 @@ interface eth1
 
 ### 6.3 dhcpcd systemd Units
 
-uplinkmgr uses the `dhcpcd.service` unit supplied by the Debian `dhcpcd` package directly — no custom unit is generated. `uplinkmgr-setup` writes `/etc/dhcpcd.conf` (backing up the previous file to `/etc/dhcpcd.conf.pre-uplinkmgr`), and the standard `dhcpcd.service` is restarted to pick it up.
+uplinkmgr ships its own unit, `dhcpcd-uplinkmgr.service` (installed to `/usr/lib/systemd/system/`, not generated), instead of using the `dhcpcd.service` unit supplied by the Debian `dhcpcd` package. `uplinkmgr-setup` writes `/etc/uplinkmgr/dhcpcd/dhcpcd.conf` and restarts `dhcpcd-uplinkmgr.service` to pick it up.
+
+The package `Conflicts: dhcpcd` (depending only on `dhcpcd-base`, which ships the `dhcpcd` binary and exit-hooks machinery but no service unit) so `dhcpcd.service` can never be installed alongside it. This is required, not just tidy: dhcpcd's PID file and management control-socket paths are hard-coded, so two independent "management mode" dhcpcd instances cannot coexist on one host. `dhcpcd-uplinkmgr.service` reuses the standard `/run/dhcpcd/pid` path precisely because `Conflicts: dhcpcd` guarantees it is always the only dhcpcd instance running.
+
+```ini
+[Unit]
+Description=DHCP Client Daemon on all interfaces (uplinkmgr-managed)
+Documentation=man:dhcpcd(8)
+After=networking.service
+Wants=networking.service network.target
+Before=network.target network-online.target
+ConditionPathExists=/etc/uplinkmgr/dhcpcd/dhcpcd.conf
+
+[Service]
+Type=forking
+PIDFile=/run/dhcpcd/pid
+ExecStart=/usr/sbin/dhcpcd -q -b -f /etc/uplinkmgr/dhcpcd/dhcpcd.conf
+ExecStop=/usr/sbin/dhcpcd -f /etc/uplinkmgr/dhcpcd/dhcpcd.conf -x
+RuntimeDirectory=dhcpcd
+Restart=on-failure
+RestartSec=15s
+
+ProtectSystem=true
+ProtectHome=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallFilter=@system-service chroot
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Notable differences from the stock Debian `dhcpcd.service`:**
+- `After=networking.service` / `Wants=networking.service` in addition to (not instead of) `Wants=network.target` / `Before=network.target`: uplinkmgr's instance *depends on* ifupdown's `networking.service`, since it needs the `auto` macvlan interfaces from `/etc/network/interfaces.d/uplinkmgr.conf` already up (§12.2 step 1) before it has anything useful to manage — but, like the stock unit, it's still a *provider* of `network.target` (the local network stack isn't "up" until it's running), so `Wants=`/`Before=network.target` is kept too.
+- `Before=network-online.target` (not present on the stock unit): the machine isn't meaningfully "online" (has a chance at internet access) until dhcpcd has run, so anything ordered after `network-online.target` waits for it. This is ordering only — no `Wants=network-online.target` is added, so it doesn't pull that target in or make reaching it block on active connectivity by itself. An administrator who wants a real connectivity check before `network-online.target` is reached can enable `ifupdown-wait-online.service` (ping method); uplinkmgr does not manage that.
+- `ProtectSystem=true` with no `ReadWritePaths=` (instead of `ProtectSystem=strict` plus an explicit `ReadWritePaths=/var/lib/dhcpcd /run/dhcpcd /etc/dhcpcd.conf /etc/resolv.conf` allowlist): `true` only makes `/usr` and `/boot` read-only, leaving all of `/etc` and `/var` writable, so dhcpcd can still write `/etc/resolv.conf` and its lease database without an explicit allowlist. Deliberately looser than the stock unit's `strict` sandboxing until every path the uplinkmgr hooks touch is fully mapped; a candidate for tightening later.
+- `Restart=on-failure` / `RestartSec=15s` (the stock unit has no `Restart=` directive at all).
+- `ExecStart`/`ExecStop` pass `-f /etc/uplinkmgr/dhcpcd/dhcpcd.conf` to target uplinkmgr's own config instead of the default `/etc/dhcpcd.conf`.
+- `ConditionPathExists=` (absent from the stock unit) keeps the service from failing outright before `uplinkmgr-setup` has run for the first time — same rationale as the radvd template unit (§6.5).
+
+**On `dh_installsystemd` management:** despite not being named `debian/uplinkmgr.service`, `dh_installsystemd` auto-detects and manages it exactly like `uplinkmgr.service` — it scans every non-template unit file present anywhere in the built package tree (`usr/lib/systemd/system/`), regardless of how it got installed there, and generates the usual `postinst`/`prerm`/`postrm` enable/start/stop/purge fragments for each one it finds. Only a *template* unit (`radvd-uplinkmgr@.service`, containing `@`) is excluded from this, since there's no default instance to enable. `uplinkmgr-setup` (§5.1.1) and `prerm`/`postrm` (§14.6) still explicitly `enable`/`restart`/`disable --now` it too — not because `dh_installsystemd` fails to, but because its autogenerated fragment only fires during `postinst configure` (package install/upgrade); an administrator who edits `uplinkmgr.yaml` and reruns `uplinkmgr-setup` by hand, without a package operation, needs that explicit restart to pick up the change. `ConditionPathExists=` (above) is what keeps `dh_installsystemd`'s unconditional `postinst`-time start attempt from being a problem on a fresh install before any config exists — systemd just skips the start (condition unmet) rather than failing.
 
 ### 6.4 radvd Configuration Files
 
@@ -1029,8 +1082,8 @@ A single **template unit**, `radvd-uplinkmgr@.service`, is shipped by the packag
 ```ini
 [Unit]
 Description=Router advertisement daemon for uplinkmgr uplink %i
-After=network.target dhcpcd.service
-Requires=dhcpcd.service
+After=network.target dhcpcd-uplinkmgr.service
+Requires=dhcpcd-uplinkmgr.service
 ConditionPathExists=/etc/uplinkmgr/radvd/radvd-uplinkmgr-%i.conf
 
 [Service]
@@ -1628,15 +1681,15 @@ Debian 13's `network-online.target` (and systemd's `wait-online` logic) will cau
 
 1. **ifupdown runs** (`/etc/init.d/networking start` or `networking.service`): Brings up all `auto` interfaces, including macvlan interfaces defined in `/etc/network/interfaces.d/uplinkmgr.conf`.
 
-2. **`dhcpcd.service` starts** (the single system dhcpcd instance; config managed by `uplinkmgr-setup`). dhcpcd manages all uplink WAN interfaces and macvlan interfaces simultaneously:
+2. **`dhcpcd-uplinkmgr.service` starts** (uplinkmgr's own dedicated dhcpcd instance; config managed by `uplinkmgr-setup`, see §6.3). dhcpcd manages all uplink WAN interfaces and macvlan interfaces simultaneously:
    - Obtains IPv4 leases on each WAN interface.
    - Adds default routes to the main table with the configured metrics (dhcpcd's own behavior; serves as boot-time fallback).
    - Runs the dhcpcd hook for each event, which writes state files and signals the daemon.
    - (For `ipv6_pd: true` uplinks) Requests prefix delegation and sub-delegates to macvlan interfaces.
 
-3. **`radvd-uplinkmgr@<name>.service` instances start** (each depends on `dhcpcd.service`). radvd begins advertising prefixes on macvlan interfaces.
+3. **`radvd-uplinkmgr@<name>.service` instances start** (each depends on `dhcpcd-uplinkmgr.service`). radvd begins advertising prefixes on macvlan interfaces.
 
-4. **`uplinkmgr.service` starts** (depends on `dhcpcd.service`). The daemon begins monitoring. Since step 2's hook events may have fired (and written state files) before this step — while nothing was running to receive their `SIGUSR1` signals — the daemon first runs `dhcpcd -g` (see §5.3.8 step 5) to force dhcpcd to replay hooks for its current state now that the daemon is ready to receive them, then performs its startup reconcile pass. At this point, routes are already configured; the daemon's initial state is `UP` for all uplinks.
+4. **`uplinkmgr.service` starts** (depends on `dhcpcd-uplinkmgr.service`). The daemon begins monitoring. Since step 2's hook events may have fired (and written state files) before this step — while nothing was running to receive their `SIGUSR1` signals — the daemon first runs `dhcpcd -g` (see §5.3.8 step 5) to force dhcpcd to replay hooks for its current state now that the daemon is ready to receive them, then performs its startup reconcile pass. At this point, routes are already configured; the daemon's initial state is `UP` for all uplinks.
 
 **Result:** IPv4 connectivity is available as soon as dhcpcd obtains a lease on any uplink interface (step 2), long before the daemon starts. Debian's boot does not time out waiting for the network. The `dhcpcd -g` replay in step 5 closes the race where step 2's hook events fired before the daemon existed to act on them, so routing state settles on the daemon's very first reconcile pass rather than waiting for a later, unrelated dhcpcd event.
 
@@ -1719,7 +1772,8 @@ If the daemon itself receives SIGHUP, it reloads the config file and resets all 
 ### 14.2 Dependencies
 
 ```
-Depends: ${python3:Depends}, ${misc:Depends}, python3-yaml, dhcpcd, radvd, iproute2, iputils-ping, ifupdown
+Depends: ${python3:Depends}, ${misc:Depends}, python3-yaml, dhcpcd-base, radvd, iproute2, iputils-ping, ifupdown
+Conflicts: dhcpcd
 ```
 
 **Notes:**
@@ -1727,6 +1781,7 @@ Depends: ${python3:Depends}, ${misc:Depends}, python3-yaml, dhcpcd, radvd, iprou
 - `python3-yaml` is required by the config loader (`config.py` imports `yaml`).
 - `iputils-ping` provides `ping` and `ping6` (or `ping` with IPv6 support — confirm on Debian 13 (Trixie)).
 - `ifupdown` is needed for the interfaces.d mechanism.
+- Depends on `dhcpcd-base` (binary + exit-hooks machinery), not `dhcpcd` (which additionally ships `dhcpcd.service` and its config/PID-file/control-socket conventions). `Conflicts: dhcpcd` prevents that unit from ever being installed alongside uplinkmgr's own `dhcpcd-uplinkmgr.service` (§6.3) — two management-mode dhcpcd instances cannot coexist on one host regardless.
 
 ### 14.3 Installed File Paths
 
@@ -1738,6 +1793,7 @@ Depends: ${python3:Depends}, ${misc:Depends}, python3-yaml, dhcpcd, radvd, iprou
 | dhcpcd hook linker | `/usr/lib/uplinkmgr/dhcpcd-hook-link` |
 | dhcpcd hooks-dir triggers | `debian/uplinkmgr.triggers` (`interest-noawait` on both candidate hooks directories) |
 | systemd service | `/lib/systemd/system/uplinkmgr.service` |
+| dhcpcd unit | `/usr/lib/systemd/system/dhcpcd-uplinkmgr.service` (§6.3) |
 | radvd template unit | `/usr/lib/systemd/system/radvd-uplinkmgr@.service` |
 | Example config | `/usr/share/doc/uplinkmgr/uplinkmgr.yaml.example` |
 | System event hooks (empty dir) | `/usr/libexec/uplinkmgr/hooks/` |
@@ -1751,7 +1807,9 @@ Generated files (written by `uplinkmgr-setup`, not by the package directly) are 
 ```ini
 [Unit]
 Description=uplinkmgr multi-WAN uplink monitor daemon
-After=network.target dhcpcd.service
+After=dhcpcd-uplinkmgr.service
+Wants=dhcpcd-uplinkmgr.service network.target
+Before=network.target
 
 [Service]
 Type=simple
@@ -1766,6 +1824,12 @@ RuntimeDirectoryPreserve=true
 [Install]
 WantedBy=multi-user.target
 ```
+
+`Wants=network.target` / `Before=network.target`: uplinkmgr.service is, like `dhcpcd-uplinkmgr.service` (§6.3), required for the local machine's network stack to be considered "up" — so `network.target` is not reached until it has started, the same pattern ifupdown's own `networking.service` uses. `After=` deliberately does *not* also list `network.target` (unlike the unit's previous, pre-`dhcpcd-uplinkmgr.service` form): combining `After=network.target` with `Before=network.target` on the same unit is a self-contradictory ordering that systemd would resolve by breaking the cycle (with a journal warning) rather than by erroring — `After=dhcpcd-uplinkmgr.service` alone is sufficient, since that unit already orders itself relative to `networking.service` and `network.target` (§6.3).
+
+`Wants=dhcpcd-uplinkmgr.service`: `After=` alone only orders the two units relative to each other *if* both are already going to start — it doesn't cause dhcpcd to be pulled in. In practice both units are independently enabled (each has its own `[Install] WantedBy=multi-user.target`, both set by `uplinkmgr-setup`, §5.1.1), so this is currently redundant at boot, but it makes the dependency explicit for any other path that starts `uplinkmgr.service` directly (manual `systemctl start`, a script that doesn't go through `uplinkmgr-setup`). `Wants=` rather than `Requires=` because the daemon is designed to tolerate dhcpcd not having reported state yet (the `dhcpcd -g` replay, §12.2 step 4) — a failed dhcpcd start shouldn't also block the daemon from starting.
+
+**No static `Wants=radvd-uplinkmgr@<name>.service`:** unlike `dhcpcd-uplinkmgr.service`, this unit file can't list the radvd instances at all — systemd's `Wants=`/`Requires=` take a fixed list of literal unit names resolved when the file is parsed, with no glob syntax, and the set of instances is inherently dynamic (one per IPv6-capable uplink in the admin's YAML config). `uplinkmgr-setup` instead gives `uplinkmgr.service` a `Wants=` on each configured instance at runtime via `systemctl add-wants` (§5.1.1), which is functionally equivalent to a static `Wants=` line but populated procedurally.
 
 `RuntimeDirectory=uplinkmgr` causes systemd to create `/run/uplinkmgr/` with the correct permissions before starting the daemon. `RuntimeDirectoryPreserve=true` overrides systemd's default of also removing that directory on every stop: the dhcpcd hook (§5.2) writes and removes the per-uplink state files in `/run/uplinkmgr/` independently of whether `uplinkmgr.service` is running, since dhcpcd itself is a separate, always-on service. Without this setting, every daemon stop or restart (crash, `systemctl restart`, manual maintenance) would discard dhcpcd's already-accurate state, forcing the daemon to fall back on the slower `dhcpcd -g` replay (§5.3.8 step 5) to reconstruct it from scratch. With it, the state files simply survive the daemon's own restarts, so its first reconcile pass after starting already reflects reality — the `dhcpcd -g` replay is then only needed for the narrower case of a hook event whose `SIGUSR1` notification was lost while the daemon was down (§5.3.8).
 
@@ -1782,11 +1846,11 @@ The `postinst` script (run with `configure` on both install and upgrade) perform
 ### 14.6 `prerm` and `postrm` Scripts
 
 `prerm` (run with `remove` or `deconfigure`, before files are removed):
-- Disables and stops all `radvd-uplinkmgr@*` instances systemd knows about (`systemctl disable --now`, enumerated via `systemctl list-units --all`). Skipped when systemd is not running.
+- Disables and stops `dhcpcd-uplinkmgr.service`, then all `radvd-uplinkmgr@*` instances systemd knows about (`systemctl disable --now`, radvd instances enumerated via `systemctl list-units --all`). Skipped when systemd is not running.
 
 `postrm` on `remove`:
-- Restores `/etc/dhcpcd.conf` from `/etc/dhcpcd.conf.pre-uplinkmgr` if the backup exists and restarts `dhcpcd.service`; otherwise removes the generated `/etc/dhcpcd.conf` and disables/stops `dhcpcd.service` (there was no dhcpcd config before uplinkmgr, so nothing sensible to run it with).
-- Removes the generated `/etc/network/interfaces.d/uplinkmgr.conf` and `/etc/iproute2/rt_tables.d/uplinkmgr.conf`, but leaves `/etc/uplinkmgr/` (including the radvd configs and env files under it) intact.
+- Removes the generated `/etc/network/interfaces.d/uplinkmgr.conf` and `/etc/iproute2/rt_tables.d/uplinkmgr.conf`, but leaves `/etc/uplinkmgr/` (including `/etc/uplinkmgr/dhcpcd/dhcpcd.conf`, the radvd configs, and the env files under it) intact. Since uplinkmgr's dhcpcd config never lives outside `/etc/uplinkmgr/` and never touches the system's own dhcpcd config, there is nothing to back up or restore here (unlike the pre-`dhcpcd-uplinkmgr.service` design).
+- Removes `/etc/systemd/system/uplinkmgr.service.wants/` — the drop-in directory `uplinkmgr-setup`'s `systemctl add-wants` calls create (§5.1.1) to give `uplinkmgr.service` a `Wants=` on each radvd instance. dpkg doesn't track this directory (it's created at runtime, not installed), so it would otherwise survive package removal.
 
 `postrm` on `purge`:
 - Removes `/etc/uplinkmgr/` entirely (the user's `uplinkmgr.yaml`, the generated radvd configs under `/etc/uplinkmgr/radvd/`, and the env files under `/etc/uplinkmgr/uplinks/`).
@@ -1913,7 +1977,7 @@ However:
 1. **Interface name length:** All derived macvlan names must be ≤ 15 characters. `uplinkmgr-setup` enforces this.
 2. **Routing table number uniqueness:** Table numbers `[routing_table_start, routing_table_start + len(uplinks)]` must not conflict with any existing table definitions.
 3. **Uplink name uniqueness:** Uplink names must be unique. This is enforced at config parse time.
-4. **dhcpcd interface restriction:** The single dhcpcd instance uses `allowinterfaces` in the generated `/etc/dhcpcd.conf` to restrict management to exactly the WAN and macvlan interfaces listed by uplinkmgr-setup. This prevents dhcpcd from autonomously configuring any other interface on the system.
+4. **dhcpcd interface restriction:** The single dhcpcd instance uses `allowinterfaces` in the generated `/etc/uplinkmgr/dhcpcd/dhcpcd.conf` to restrict management to exactly the WAN and macvlan interfaces listed by uplinkmgr-setup. This prevents dhcpcd from autonomously configuring any other interface on the system.
 5. **Hook idempotency:** The dhcpcd hook must be safe to run multiple times for the same event (e.g., RENEW after BOUND). It writes state files atomically (write to `<file>.tmp`, then `mv` to `<file>`) and signals the daemon; the daemon's reconcile logic is inherently idempotent (`ip route replace` is atomic; rules are only installed if not already present with the same parameters).
 6. **Daemon optimistic start:** The daemon must not deprovision uplinks at startup. Routes are assumed to be correctly configured by dhcpcd before the daemon starts.
 
@@ -1962,7 +2026,7 @@ The following items require verification against upstream documentation or testi
 | 12 | iproute2 | ~~Behavior when `ip route add` is called for a route that already exists~~ **Confirmed:** `ip route add` errors on a duplicate route. All route installation uses `ip route replace` throughout. | — |
 | 13 | kernel | ~~Behavior of `addr_gen_mode=1` set in `pre-up` — whether it persists after the interface is deleted and recreated~~ **Resolved:** set it unconditionally in every `pre-up` stanza regardless of prior state. | — |
 | 14 | ping | ~~Whether `ping6` is available separately or merged into `ping` on Debian 13's `iputils-ping`~~ **Confirmed:** `ping6` is provided by `iputils-ping`. | — |
-| 15 | dhcpcd | ~~Whether running uplinkmgr's dhcpcd alongside a system-default dhcpcd instance would cause conflicts~~ **Resolved:** conflicts are avoided by design. uplinkmgr uses a single dhcpcd instance (the system `dhcpcd.service`) with `allowinterfaces` restricting it to uplinkmgr's interfaces. The system-default dhcpcd config is replaced by `postinst`; no separate per-uplink dhcpcd process is involved. | — |
+| 15 | dhcpcd | ~~Whether running uplinkmgr's dhcpcd alongside a system-default dhcpcd instance would cause conflicts~~ **Resolved:** conflicts are avoided by exclusion, not sharing. uplinkmgr `Conflicts: dhcpcd` (depending only on `dhcpcd-base`) so the stock `dhcpcd.service` can never be installed alongside it, and runs its own `dhcpcd-uplinkmgr.service` instance (§6.3) with `allowinterfaces` restricting it to uplinkmgr's interfaces. dhcpcd's hard-coded PID file and control-socket paths mean two management-mode instances could not coexist even if both units were present, which is exactly what the `Conflicts` prevents. | — |
 | 16 | iproute2 | ~~Whether `ip -6 route replace … expires <seconds>` is valid syntax for setting route expiry in iproute2 on Debian 13 (Trixie)~~ **Confirmed:** correct syntax. | — |
 | 17 | radvd | ~~Whether radvd resets `DecrementLifetimes` counters to the config-file values on SIGHUP, or continues counting from where they were~~ **Confirmed:** SIGHUP does not reset counters; they continue decrementing from where they were. However, `DecrementLifetimes on` is not used: radvd advertises `min(configured_lifetime, address_lifetime_on_interface)`, and since dhcpcd keeps macvlan address lifetimes current, the interface address IS the countdown. `DecrementLifetimes off` is set universally; SIGHUP is sufficient for all radvd config updates including lifetime changes. | — |
 | 18 | radvd | ~~Whether empty `RDNSS { };` / `DNSSL { };` stanzas are valid radvd config~~ **Confirmed: not valid.** radvd rejects empty `RDNSS`/`DNSSL` blocks. Since uplinkmgr has no config option that ever populates DNS server or search-domain content, these stanzas are omitted from generated radvd config entirely rather than emitted empty. | — |

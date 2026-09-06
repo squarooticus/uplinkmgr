@@ -6,6 +6,7 @@ from uplinkmgr.naming import (
     macvlan_name, mac_address, macvlan_iaid, link_local,
     ipv4_table_num, ipv4_table_name,
     ipv6_table_num, ipv6_table_name,
+    dhcpcd_conf_path, dhcpcd_conf_head_path, dhcpcd_conf_tail_path,
     radvd_conf_path, radvd_unit_name,
     env_file_path, env_symlink_path,
     validate_macvlan_names,
@@ -142,6 +143,18 @@ def test_ipv6_table_name():
 
 
 # --- path/name helpers ---
+
+def test_dhcpcd_conf_path():
+    assert dhcpcd_conf_path() == "/etc/uplinkmgr/dhcpcd/dhcpcd.conf"
+
+
+def test_dhcpcd_conf_head_path():
+    assert dhcpcd_conf_head_path() == "/etc/uplinkmgr/dhcpcd/dhcpcd.conf.head"
+
+
+def test_dhcpcd_conf_tail_path():
+    assert dhcpcd_conf_tail_path() == "/etc/uplinkmgr/dhcpcd/dhcpcd.conf.tail"
+
 
 def test_radvd_conf_path():
     assert radvd_conf_path("comcast") == "/etc/uplinkmgr/radvd/radvd-uplinkmgr-comcast.conf"

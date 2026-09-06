@@ -3,33 +3,23 @@ set -e
 
 #DEBHELPER#
 
-_if_systemd() {
-    if [ -d /run/systemd/system ]; then
-        "$@"
-    fi
-}
-
-_restore_dhcpcd_conf() {
-    if [ -f /etc/dhcpcd.conf.pre-uplinkmgr ]; then
-        mv /etc/dhcpcd.conf.pre-uplinkmgr /etc/dhcpcd.conf
-        echo "uplinkmgr: restored dhcpcd.conf from pre-uplinkmgr backup; restarting"
-        _if_systemd systemctl restart dhcpcd.service || true
-    else
-        echo "uplinkmgr: no prior dhcpcd.conf; disabling"
-        _if_systemd systemctl disable --now dhcpcd.service || true
-        rm -f /etc/dhcpcd.conf
-    fi
-}
-
 case "$1" in
     purge)
         rm -rf /etc/uplinkmgr
         ;;
 
     remove)
-        _restore_dhcpcd_conf
+        # dhcpcd-uplinkmgr.service is already stopped/disabled by prerm; its
+        # config lives under /etc/uplinkmgr/, so it's left alone here (like
+        # the radvd configs and env files) and only removed on purge.
         # Remove generated files but leave /etc/uplinkmgr/ intact
         rm -f /etc/network/interfaces.d/uplinkmgr.conf
         rm -f /etc/iproute2/rt_tables.d/uplinkmgr.conf
+        # uplinkmgr-setup adds a per-instance Wants= from uplinkmgr.service
+        # to each radvd-uplinkmgr@<name>.service via `systemctl add-wants`
+        # (see bin/uplinkmgr-setup), since the set of instances is dynamic
+        # and can't be listed in uplinkmgr.service's own unit file. dpkg
+        # doesn't track that drop-in directory, so remove it here.
+        rm -rf /etc/systemd/system/uplinkmgr.service.wants
         ;;
 esac

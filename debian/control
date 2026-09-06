@@ -18,12 +18,12 @@ Depends:
  ${python3:Depends},
  ${misc:Depends},
  python3-yaml,
- dhcpcd,
  dhcpcd-base,
  radvd,
  iproute2,
  iputils-ping,
  ifupdown,
+Conflicts: dhcpcd
 Description: Multi-WAN uplink manager with IPv4 failover and IPv6 multi-homing
  uplinkmgr configures a Linux router to handle multiple internet (WAN)
  uplinks with automatic failover for IPv4 and multi-homing for IPv6.

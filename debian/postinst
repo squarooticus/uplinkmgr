@@ -7,7 +7,7 @@ case "$1" in
             # Brief instructions on how to configure and enable uplinkmgr
             echo "uplinkmgr: Example config at /usr/share/doc/uplinkmgr/uplinkmgr.yaml.example"
             echo "uplinkmgr: Copy to /etc/uplinkmgr/uplinkmgr.yaml and modify where necessary"
-            echo "uplinkmgr: Possibly add /etc/uplinkmgr/dhcpcd.conf.{head,tail} to tweak dhcpcd config"
+            echo "uplinkmgr: Possibly add /etc/uplinkmgr/dhcpcd/dhcpcd.conf.{head,tail} to tweak dhcpcd config"
             echo "uplinkmgr: Finally, run 'uplinkmgr-setup' to enable"
         else
             # (Re)generate config files if already configured

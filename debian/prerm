@@ -4,7 +4,8 @@ set -e
 case "$1" in
     remove|deconfigure)
         if [ -d /run/systemd/system ]; then
-            # Disable and stop radvd units
+            # Disable and stop our dhcpcd instance and all radvd units
+            systemctl disable --now dhcpcd-uplinkmgr.service || true
             for unit in $(systemctl list-units --all 'radvd-uplinkmgr@*' --no-legend | awk '{print $1;}'); do
                 systemctl disable --now "$unit" || true
             done

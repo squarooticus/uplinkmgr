@@ -1,0 +1,41 @@
+[Unit]
+Description=DHCP Client Daemon on all interfaces (uplinkmgr-managed)
+Documentation=man:dhcpcd(8)
+After=networking.service
+Wants=networking.service network.target
+Before=network.target network-online.target
+ConditionPathExists=/etc/uplinkmgr/dhcpcd/dhcpcd.conf
+
+[Service]
+Type=forking
+PIDFile=/run/dhcpcd/pid
+ExecStart=/usr/sbin/dhcpcd -q -b -f /etc/uplinkmgr/dhcpcd/dhcpcd.conf
+ExecStop=/usr/sbin/dhcpcd -f /etc/uplinkmgr/dhcpcd/dhcpcd.conf -x
+RuntimeDirectory=dhcpcd
+Restart=on-failure
+RestartSec=15s
+#
+# sandboxing
+#
+# Only /usr and /boot are made read-only here (ProtectSystem=strict would also
+# lock down /etc and /var); this is deliberately looser than the stock
+# dhcpcd.service until every path uplinkmgr's hooks touch is fully mapped.
+ProtectSystem=true
+ProtectHome=true
+#PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallFilter=@system-service chroot
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

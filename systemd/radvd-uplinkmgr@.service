@@ -1,7 +1,7 @@
 [Unit]
 Description=Router advertisement daemon for uplinkmgr uplink %i
-After=network.target dhcpcd.service
-Requires=dhcpcd.service
+After=network.target dhcpcd-uplinkmgr.service
+Requires=dhcpcd-uplinkmgr.service
 ConditionPathExists=/etc/uplinkmgr/radvd/radvd-uplinkmgr-%i.conf
 
 [Service]

@@ -17,9 +17,16 @@ override_dh_auto_install:
 	install -d debian/uplinkmgr/usr/lib/uplinkmgr
 	install -m 755 hooks/dhcpcd-hook hooks/dhcpcd-hook-link \
 	    debian/uplinkmgr/usr/lib/uplinkmgr/
-	# radvd systemd template unit file
+	# radvd systemd template unit file, and uplinkmgr's own dhcpcd unit.
+	# dh_installsystemd auto-detects and manages any non-template unit file
+	# found anywhere under usr/lib/systemd/system/ in the built tree (not
+	# just debian/uplinkmgr.service by name), so dhcpcd-uplinkmgr.service
+	# gets the same enable/start/stop/purge handling as uplinkmgr.service --
+	# only the *template* radvd-uplinkmgr@.service is excluded from that
+	# (no default instance to enable), which is why its enable/disable stays
+	# manual, driven by uplinkmgr-setup and prerm (see SPEC.md §6.3, §14.6).
 	install -d debian/uplinkmgr/usr/lib/systemd/system
-	install -m 644 systemd/radvd-uplinkmgr@.service \
+	install -m 644 systemd/radvd-uplinkmgr@.service systemd/dhcpcd-uplinkmgr.service \
 	    debian/uplinkmgr/usr/lib/systemd/system/
 	# Event hooks: system-installed (package-managed) and
 	# administrator-installed drop-in directories, shipped empty.

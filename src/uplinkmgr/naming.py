@@ -84,6 +84,18 @@ def ipv6_table_name(uplink_name: str) -> str:
 
 
 
+def dhcpcd_conf_path() -> str:
+    return "/etc/uplinkmgr/dhcpcd/dhcpcd.conf"
+
+
+def dhcpcd_conf_head_path() -> str:
+    return "/etc/uplinkmgr/dhcpcd/dhcpcd.conf.head"
+
+
+def dhcpcd_conf_tail_path() -> str:
+    return "/etc/uplinkmgr/dhcpcd/dhcpcd.conf.tail"
+
+
 def radvd_conf_path(uplink_name: str) -> str:
     return f"/etc/uplinkmgr/radvd/radvd-uplinkmgr-{uplink_name}.conf"
 

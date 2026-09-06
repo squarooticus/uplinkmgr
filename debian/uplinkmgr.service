@@ -1,6 +1,8 @@
 [Unit]
 Description=uplinkmgr multi-WAN uplink monitor daemon
-After=network.target dhcpcd.service
+After=dhcpcd-uplinkmgr.service
+Wants=dhcpcd-uplinkmgr.service network.target
+Before=network.target
 
 [Service]
 Type=simple

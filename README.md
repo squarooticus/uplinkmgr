@@ -34,11 +34,14 @@ delegates to existing tools rather than replacing them:
   in `/etc/network/interfaces` and `/etc/network/interfaces.d/`. uplinkmgr
   does not bring interfaces up or down itself.
 
-- **dhcpcd** (package `dhcpcd`) handles DHCP and DHCPv6 on WAN interfaces,
-  including requesting IPv6 prefix delegation and sub-delegating subnets to
-  macvlan interfaces. uplinkmgr-setup generates `/etc/dhcpcd.conf`; the hook
-  installed at `/usr/lib/uplinkmgr/dhcpcd-hook` — symlinked as `50-uplinkmgr`
-  into whichever dhcpcd-hooks directory the installed `dhcpcd-base` expects
+- **dhcpcd** (package `dhcpcd-base`; uplinkmgr `Conflicts:` with the `dhcpcd`
+  package so its `dhcpcd.service` can't run alongside uplinkmgr's own) handles
+  DHCP and DHCPv6 on WAN interfaces, including requesting IPv6 prefix
+  delegation and sub-delegating subnets to macvlan interfaces. uplinkmgr-setup
+  generates `/etc/uplinkmgr/dhcpcd/dhcpcd.conf`, run by the packaged
+  `dhcpcd-uplinkmgr.service` unit; the hook installed at
+  `/usr/lib/uplinkmgr/dhcpcd-hook` — symlinked as `50-uplinkmgr` into
+  whichever dhcpcd-hooks directory the installed `dhcpcd-base` expects
   (`/usr/libexec/dhcpcd-hooks` or `/usr/lib/dhcpcd/dhcpcd-hooks`, depending on
   version) — is the handoff point between dhcpcd events and the daemon.
 
@@ -105,8 +108,8 @@ uplinkmgr-setup
 ```
 
 This writes:
-- `/etc/dhcpcd.conf` — dhcpcd config covering all WAN and macvlan interfaces
-  (backs up any existing file to `/etc/dhcpcd.conf.pre-uplinkmgr`)
+- `/etc/uplinkmgr/dhcpcd/dhcpcd.conf` — dhcpcd config covering all WAN and
+  macvlan interfaces, run by the packaged `dhcpcd-uplinkmgr.service`
 - `/etc/network/interfaces.d/uplinkmgr.conf` — macvlan interface stanzas
 - `/etc/uplinkmgr/radvd/radvd-uplinkmgr-<name>.conf` — radvd config per IPv6 uplink
 - `/etc/iproute2/rt_tables.d/uplinkmgr.conf` — routing table name entries
@@ -124,7 +127,7 @@ When systemd is running, `uplinkmgr-setup` finishes by enabling and starting
 everything itself — equivalent to:
 
 ```sh
-systemctl enable --now dhcpcd                             # plus a restart to pick up the new config
+systemctl enable --now dhcpcd-uplinkmgr                   # plus a restart to pick up the new config
 systemctl enable --now radvd-uplinkmgr@comcast.service   # repeat for each IPv6 uplink
 systemctl enable --now uplinkmgr                          # plus a restart if already running
 ```
@@ -413,7 +416,8 @@ uplinkmgr:
 ## Requirements
 
 - Debian 13 (Trixie) or equivalent
-- dhcpcd 10.x (`dhcpcd` package)
+- dhcpcd 10.x (`dhcpcd-base` package; `dhcpcd` itself must not be installed —
+  uplinkmgr `Conflicts:` with it and ships its own `dhcpcd-uplinkmgr.service`)
 - radvd 2.x (`radvd` package)
 - iproute2, iputils-ping, ifupdown
 - Python 3.9+, python3-yaml
